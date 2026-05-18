@@ -24,7 +24,7 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
-from .contract import Contract
+from .contract import ACCEL_REFERENCE, Acceleration, Contract
 from .data import GIVER_COLS, extract_giver_features
 from .extraction import run_instance
 from .persistence import (
@@ -51,6 +51,7 @@ def run_extraction(
     device: Optional[str] = None,
     has_generation: bool = False,
     generation_fn: Optional[Callable] = None,
+    acceleration: Acceleration = ACCEL_REFERENCE,
 ) -> Dict[str, Dict]:
     """Run the full extraction for both conditions, saving outputs to ``base_dir``.
 
@@ -142,6 +143,7 @@ def run_extraction(
                     forward_hidden_states_mode=forward_hidden_states_mode,
                     use_truncation=use_truncation,
                     max_seq_len=max_seq_len,
+                    acceleration=acceleration,
                 )
                 general_records.append(g)
                 metrics_buffer.extend(m)
@@ -217,6 +219,7 @@ def run_extraction(
                         forward_hidden_states_mode=forward_hidden_states_mode,
                         use_truncation=use_truncation,
                         max_seq_len=max_seq_len,
+                        acceleration=acceleration,
                     )
                     general_records.append(g_shuf)
                     metrics_buffer.extend(m_shuf)

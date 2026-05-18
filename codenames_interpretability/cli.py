@@ -9,6 +9,7 @@ Subcommands:
 - ``preflight``:  random-init pre-flight diagnostic
 - ``validate``:   bit-identity check against existing outputs
 - ``sanity``:     re-run SC functions on already-extracted results
+- ``compare``:    reference path vs accelerated path, with per-column deltas
 
 Output of each subcommand is identical to running the corresponding cells of
 the model notebook in order; no extra logging, no progress suppression. All
@@ -115,6 +116,31 @@ def _make_validate_parser(sp: "argparse._SubParsersAction") -> argparse.Argument
                    help="Number of boards to validate on (default: 50).")
     p.add_argument("--tolerance", type=float, default=1e-6,
                    help="Numeric tolerance for CSV comparisons (default: 1e-6).")
+    return p
+
+
+def _make_compare_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "compare",
+        help="Run reference path vs accelerated path and report deltas.",
+        description=(
+            "Runs the same extraction twice on a small subsample: once with "
+            "Acceleration defaults (reference path) and once with the "
+            "requested acceleration flags. Prints per-column max-abs / "
+            "mean-abs delta, used to quantify the tolerance introduced by "
+            "each optimization for the thesis appendix."
+        ),
+    )
+    p.add_argument("--model", required=True, choices=list(MODEL_REGISTRY))
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("-n", "--n", type=int, default=50,
+                   help="Number of boards to compare on (default: 50).")
+    p.add_argument("--vectorize-anisotropy", action="store_true",
+                   help="Enable vectorized all-pairs anisotropy.")
+    p.add_argument("--flash-attn", action="store_true",
+                   help="Enable Flash Attention 2 (Mistral/Qwen only).")
+    p.add_argument("--batch-size", type=int, default=1,
+                   help="Boards per forward pass (default: 1 = reference).")
     return p
 
 
@@ -348,6 +374,82 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Reference path vs accelerated path on a small subsample."""
+    from .contract import ACCEL_REFERENCE, Acceleration, CONTRACT_V1, Contract
+    from .comparison import compare_runs
+    from .data import load_dataset, sample_turns
+    from .generation import generate_response
+
+    loader = _resolve_loader(args.model)
+
+    contract = Contract(
+        sample_size=args.n,
+        candidate_order=CONTRACT_V1.candidate_order,
+        pooling_methods=CONTRACT_V1.pooling_methods,
+        vector_subsample_size=CONTRACT_V1.vector_subsample_size,
+        n_shuffles=CONTRACT_V1.n_shuffles,
+        generation_max_tokens=CONTRACT_V1.generation_max_tokens,
+        shard_boards=CONTRACT_V1.shard_boards,
+        random_seed=CONTRACT_V1.random_seed,
+        max_seq_len=CONTRACT_V1.max_seq_len,
+    )
+
+    fast_accel = Acceleration(
+        vectorize_anisotropy=args.vectorize_anisotropy,
+        flash_attention_for_causal=args.flash_attn,
+        batch_size=args.batch_size,
+    )
+
+    # Reference model: default attn_implementation (eager for causal,
+    # whatever the loader picks for ModernBERT).
+    print(f"Loading reference model: {args.model}")
+    try:
+        model_ref, tokenizer_ref, meta_ref = loader()
+    except TypeError:
+        # Loader may not yet accept attn_implementation kwarg. Fall back.
+        model_ref, tokenizer_ref, meta_ref = loader()
+
+    # Fast model: if FA2 is requested AND the loader supports it, reload.
+    # Otherwise the same model object is reused.
+    if fast_accel.flash_attention_for_causal and args.model in ("mistral", "qwen"):
+        print(f"Loading fast-path model with attn_implementation='flash_attention_2'")
+        try:
+            model_fast, tokenizer_fast, _ = loader(attn_implementation="flash_attention_2")
+        except TypeError:
+            print(
+                "WARNING: this loader does not yet accept attn_implementation; "
+                "falling back to a single shared model for both passes. "
+                "Flash Attention 2 effect will not be measured."
+            )
+            model_fast, tokenizer_fast = model_ref, tokenizer_ref
+    else:
+        model_fast, tokenizer_fast = model_ref, tokenizer_ref
+
+    df = load_dataset(args.dataset)
+    df_sample = sample_turns(df, n=args.n, seed=CONTRACT_V1.random_seed)
+
+    compare_runs(
+        model_ref=model_ref,
+        tokenizer_ref=tokenizer_ref,
+        model_fast=model_fast,
+        tokenizer_fast=tokenizer_fast,
+        df=df_sample,
+        prefix=meta_ref["prefix"],
+        contract=contract,
+        chat_template_strategy=meta_ref["chat_template_strategy"],
+        forward_hidden_states_mode=meta_ref["forward_hidden_states_mode"],
+        use_truncation=meta_ref["use_truncation"],
+        num_layers=meta_ref["num_layers"],
+        hidden_dim=meta_ref["hidden_dim"],
+        device=meta_ref["device"],
+        has_generation=meta_ref["supports_generation"],
+        generation_fn=generate_response if meta_ref["supports_generation"] else None,
+        fast_acceleration=fast_accel,
+    )
+    return 0
+
+
 def _cmd_sanity(args: argparse.Namespace) -> int:
     """Re-run SC functions on already-extracted output files."""
     from .contract import CONTRACT_V1
@@ -495,6 +597,7 @@ def main(argv=None) -> int:
     _make_run_parser(sp)
     _make_preflight_parser(sp)
     _make_validate_parser(sp)
+    _make_compare_parser(sp)
     _make_sanity_parser(sp)
 
     args = parser.parse_args(argv)
@@ -505,6 +608,8 @@ def main(argv=None) -> int:
         return _cmd_preflight(args)
     if args.command == "validate":
         return _cmd_validate(args)
+    if args.command == "compare":
+        return _cmd_compare(args)
     if args.command == "sanity":
         return _cmd_sanity(args)
 

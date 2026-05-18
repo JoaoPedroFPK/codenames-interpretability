@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .contract import ACCEL_REFERENCE, Acceleration
 from .data import extract_giver_features
 from .prompts import build_prompt
 from .spans import cosine_similarity_np, find_token_spans, pool_span
@@ -52,6 +53,7 @@ def run_instance(
     forward_hidden_states_mode: str,
     use_truncation: bool,
     max_seq_len: int = 512,
+    acceleration: Acceleration = ACCEL_REFERENCE,
 ) -> Tuple[Dict, List[Dict], Optional[List[Dict]]]:
     """Process a single board under a given candidate ordering.
 
@@ -84,7 +86,16 @@ def run_instance(
         emit a ``"truncated"`` flag in the general record.
     max_seq_len
         Truncation length when ``use_truncation`` is True. Default 512.
+    acceleration
+        Implementation-detail flags (vectorized anisotropy, FA2, batch_size).
+        Defaults to ``ACCEL_REFERENCE`` (all flags off = original code path).
+        Individual flags are honoured at their respective code sites later
+        in the function and in :func:`loop.run_extraction`.
     """
+    # Mark the parameter as consumed by the caller via downstream sites.
+    # No optimizations are honoured at this revision — they're added in
+    # subsequent commits, each with comparison-harness validation.
+    _ = acceleration
     row_id     = int(row["row_id"])
     hint       = str(row["output"])
     candidates = list(candidates_order)
