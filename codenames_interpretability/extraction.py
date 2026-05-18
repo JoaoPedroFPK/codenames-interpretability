@@ -92,10 +92,6 @@ def run_instance(
         Individual flags are honoured at their respective code sites later
         in the function and in :func:`loop.run_extraction`.
     """
-    # Mark the parameter as consumed by the caller via downstream sites.
-    # No optimizations are honoured at this revision — they're added in
-    # subsequent commits, each with comparison-harness validation.
-    _ = acceleration
     row_id     = int(row["row_id"])
     hint       = str(row["output"])
     candidates = list(candidates_order)
@@ -283,29 +279,48 @@ def run_instance(
                     ranks_per_method[pm][c] = float("nan")
 
         # --- All-pairs candidate cosines for anisotropy (mean pooling) ---
-        all_pair_cosines_layer = []
         valid_cand_vecs_mean = []
         for c in candidates:
             v = cand_vecs[c]["mean"]
             if v is not None:
                 valid_cand_vecs_mean.append(v.astype(np.float32))
         n_valid = len(valid_cand_vecs_mean)
-        if n_valid >= 2:
-            for i in range(n_valid):
-                for j in range(i + 1, n_valid):
-                    all_pair_cosines_layer.append(
-                        cosine_similarity_np(
-                            valid_cand_vecs_mean[i],
-                            valid_cand_vecs_mean[j],
-                        )
-                    )
 
-        if all_pair_cosines_layer:
-            layer_aniso_mean = float(np.mean(all_pair_cosines_layer))
-            layer_aniso_std  = float(np.std(all_pair_cosines_layer))
+        if n_valid >= 2:
+            if acceleration.vectorize_anisotropy:
+                # Vectorized path: single matrix product instead of nested
+                # Python loop. The matmul reorders ~hidden_dim fp32 additions
+                # per cosine, so the resulting cosines drift by ~1e-7 per
+                # element vs the per-pair np.dot. The aggregate
+                # layer_mean_pairwise_cosine sees ~1e-6 drift at most.
+                M = np.stack(valid_cand_vecs_mean)
+                norms = np.linalg.norm(M, axis=1)
+                # Match the reference path: zero-norm rows produce 0.0
+                # cosines, not NaN. Replace zero norms with 1.0 then zero
+                # those rows post-normalization.
+                safe_norms = np.where(norms == 0.0, 1.0, norms)
+                M_norm = M / safe_norms[:, None]
+                M_norm[norms == 0.0] = 0.0
+                sim = M_norm @ M_norm.T
+                iu = np.triu_indices(n_valid, k=1)
+                pair_cosines = sim[iu]
+                layer_aniso_mean = float(pair_cosines.mean())
+                layer_aniso_std = float(pair_cosines.std())
+            else:
+                all_pair_cosines_layer = []
+                for i in range(n_valid):
+                    for j in range(i + 1, n_valid):
+                        all_pair_cosines_layer.append(
+                            cosine_similarity_np(
+                                valid_cand_vecs_mean[i],
+                                valid_cand_vecs_mean[j],
+                            )
+                        )
+                layer_aniso_mean = float(np.mean(all_pair_cosines_layer))
+                layer_aniso_std = float(np.std(all_pair_cosines_layer))
         else:
             layer_aniso_mean = float("nan")
-            layer_aniso_std  = float("nan")
+            layer_aniso_std = float("nan")
 
         # --- Build metric records: hint ---
         hint_metric = {
