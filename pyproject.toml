@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codenames-interpretability"
+version = "1.0.0"
+description = "Layer-wise word representation geometry across transformer architectures, evaluated on Codenames Duet"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "TCC" }]
+keywords = ["interpretability", "transformers", "geometric-analysis", "codenames"]
+
+dependencies = [
+    "torch",
+    "transformers",
+    "numpy",
+    "pandas",
+    "tqdm",
+    "scipy",
+    "pyarrow",
+    "accelerate",
+]
+
+[project.scripts]
+codenames-experiment = "codenames_interpretability.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["codenames_interpretability*"]
+exclude = ["tests*", "notebooks*", "docs*"]
