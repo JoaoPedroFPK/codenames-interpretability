@@ -213,6 +213,43 @@ saved in Drive. Run this before trusting the refactored code with a
 new experiment to verify that the package produces outputs interchangeable
 with the original notebook-based runs.
 
+### Acceleration (optional)
+
+Three opt-in flags trade bit-identity with the reference path for
+wall-clock speedup. None of them change the methodology; each is
+characterised against the reference path by the `compare` subcommand
+before being used in a production run.
+
+| Flag | What it does | Expected drift |
+|---|---|---|
+| `--vectorize-anisotropy` | Replace nested O(n²) Python loop over candidate pairs with a single `M @ M.T` matrix product | ~1e-6 on `layer_mean_pairwise_cosine` |
+| `--flash-attn` | Load Mistral or Qwen with `attn_implementation="flash_attention_2"` (requires `flash_attn` installed) | ~1-ULP per attention head per token, compounding through 28-32 layers |
+| `--batch-size N` | Run N boards through one forward pass (with right-padding and attention mask). Default 1 = reference. | fp16 reduction-order drift on the sequence dim; >99% of final ranks agree |
+
+Quantify the per-cell tolerance on a 50-board subsample first:
+
+```
+codenames-experiment compare \
+    --model bert \
+    --dataset /content/drive/MyDrive/TCC/clue_generation.csv \
+    -n 50 --batch-size 8 --vectorize-anisotropy
+```
+
+Then enable the same flags on the production `run`:
+
+```
+codenames-experiment run \
+    --model bert \
+    --dataset /content/drive/MyDrive/TCC/clue_generation.csv \
+    --output-dir /content/drive/MyDrive/TCC/bert_outputs \
+    --batch-size 8 --vectorize-anisotropy
+```
+
+`--flash-attn` for Mistral or Qwen requires two model loads in `compare`
+(the reference pass uses eager attention, the fast pass uses FA2). The
+CLI handles this by freeing the reference model between passes so only
+one 7B model is in GPU memory at a time.
+
 ---
 
 ## Mapping the thesis to the code
