@@ -28,6 +28,7 @@ from .contract import ACCEL_REFERENCE, Acceleration, Contract
 from .data import GIVER_COLS, extract_giver_features
 from .extraction import run_instance, run_instance_batched
 from .persistence import (
+    save_error_log,
     save_general_csv,
     save_generation_csv,
     save_vector_subsample,
@@ -469,6 +470,10 @@ def run_extraction(
         generation_df = pd.DataFrame(generation_records)
         if has_generation and len(generation_df) > 0:
             save_generation_csv(generation_df, base_dir, prefix, mode_name)
+
+        # Persist error log per mode so post-hoc debugging doesn't depend on
+        # the in-memory results dict surviving the session.
+        save_error_log(error_log, base_dir, prefix, mode_name)
 
         print(f"\nCondition '{mode_name}' complete.")
         print(f"  Boards processed     : {len(df_sample)}")
