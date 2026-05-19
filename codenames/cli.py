@@ -29,13 +29,13 @@ import pandas as pd
 
 
 MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
-    "mistral":     ("codenames_interpretability.models.mistral",     "load_mistral_instruct"),
-    "qwen":        ("codenames_interpretability.models.qwen",        "load_qwen_instruct"),
-    "qwen_random": ("codenames_interpretability.models.qwen_random", "load_qwen_random"),
-    "bert":        ("codenames_interpretability.models.bert",        "load_bert_base"),
-    "bert_random": ("codenames_interpretability.models.bert_random", "load_bert_random"),
-    "t5":          ("codenames_interpretability.models.t5",          "load_t5_encoder"),
-    "modernbert":  ("codenames_interpretability.models.modernbert",  "load_modernbert"),
+    "mistral":     ("codenames.models.mistral",     "load_mistral_instruct"),
+    "qwen":        ("codenames.models.qwen",        "load_qwen_instruct"),
+    "qwen_random": ("codenames.models.qwen_random", "load_qwen_random"),
+    "bert":        ("codenames.models.bert",        "load_bert_base"),
+    "bert_random": ("codenames.models.bert_random", "load_bert_random"),
+    "t5":          ("codenames.models.t5",          "load_t5_encoder"),
+    "modernbert":  ("codenames.models.modernbert",  "load_modernbert"),
 }
 
 

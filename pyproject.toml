@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [project.scripts]
-codenames-experiment = "codenames_interpretability.cli:main"
+codenames-experiment = "codenames.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["codenames_interpretability*"]
+include = ["codenames*"]
 exclude = ["tests*", "notebooks*", "docs*"]

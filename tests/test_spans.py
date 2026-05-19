@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from codenames_interpretability.spans import (
+from codenames.spans import (
     cosine_similarity_np,
     find_token_spans,
     max_norm_pool_span,

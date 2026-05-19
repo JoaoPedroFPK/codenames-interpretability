@@ -8,8 +8,8 @@ be exercised without GPU.
 
 import math
 
-from codenames_interpretability.contract import CONTRACT_V1, Contract
-from codenames_interpretability.sanity import _wilson_confidence_interval
+from codenames.contract import CONTRACT_V1, Contract
+from codenames.sanity import _wilson_confidence_interval
 
 
 def test_contract_is_frozen():

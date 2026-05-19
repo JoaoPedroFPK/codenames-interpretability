@@ -272,7 +272,7 @@ codenames-interpretability/
 ├── LICENSE                         # MIT, see Section 10
 ├── .gitignore                      # Standard Python ignore
 ├── pyproject.toml                  # Package metadata, see Section 7.0
-├── codenames_interpretability/     # The package
+├── codenames/     # The package
 │   ├── __init__.py
 │   ├── contract.py                 # Section 7.1
 │   ├── data.py                     # Section 7.2
@@ -323,7 +323,7 @@ codenames-interpretability/
 
 The `reference_notebooks/` directory is the authoritative source for
 every implementation detail. The agent reads from it but does not write
-to it. The agent's job is to produce everything in `codenames_interpretability/`
+to it. The agent's job is to produce everything in `codenames/`
 and `notebooks/` so that the methodology preserved in `reference_notebooks/`
 becomes maintainable and reviewable as a package.
 
@@ -474,10 +474,10 @@ dependencies = [
 ]
 
 [project.scripts]
-codenames-experiment = "codenames_interpretability.cli:main"
+codenames-experiment = "codenames.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["codenames_interpretability*"]
+include = ["codenames*"]
 exclude = ["tests*", "notebooks*", "docs*"]
 ```
 
@@ -903,7 +903,7 @@ weights, then an **explicit RMSNorm re-init loop** because Qwen2's
 `_init_weights` does not handle RMSNorm and the constructor-set values
 of 1.0 are wiped by `to_empty()`. The pre-flight diagnostic also lives
 in this notebook and must be ported to a separate module
-(`codenames_interpretability.diagnostics`) — see Section 8 for how the
+(`codenames.diagnostics`) — see Section 8 for how the
 Random Qwen notebook calls it. **Do not improvise this loader; the
 canonical notebook is the only correct reference.**
 
@@ -924,7 +924,7 @@ package functions, it does not belong in the CLI.
 The module exposes a `main()` function registered as a console script in
 `pyproject.toml`. After `pip install -e .`, the command
 `codenames-experiment` is available on the user's PATH. The same module
-is also runnable via `python -m codenames_interpretability` for cases
+is also runnable via `python -m codenames` for cases
 where the script is not on PATH (Colab `!` invocations).
 
 #### Model dispatch
@@ -936,13 +936,13 @@ mapping each string to its loader function:
 
 ```python
 MODEL_REGISTRY = {
-    "mistral": ("codenames_interpretability.models.mistral", "load_mistral_instruct"),
-    "qwen": ("codenames_interpretability.models.qwen", "load_qwen_instruct"),
-    "qwen_random": ("codenames_interpretability.models.qwen_random", "load_qwen_random"),
-    "bert": ("codenames_interpretability.models.bert", "load_bert_base"),
-    "bert_random": ("codenames_interpretability.models.bert_random", "load_bert_random"),
-    "t5": ("codenames_interpretability.models.t5", "load_t5_encoder"),
-    "modernbert": ("codenames_interpretability.models.modernbert", "load_modernbert"),
+    "mistral": ("codenames.models.mistral", "load_mistral_instruct"),
+    "qwen": ("codenames.models.qwen", "load_qwen_instruct"),
+    "qwen_random": ("codenames.models.qwen_random", "load_qwen_random"),
+    "bert": ("codenames.models.bert", "load_bert_base"),
+    "bert_random": ("codenames.models.bert_random", "load_bert_random"),
+    "t5": ("codenames.models.t5", "load_t5_encoder"),
+    "modernbert": ("codenames.models.modernbert", "load_modernbert"),
 }
 ```
 
@@ -1186,19 +1186,19 @@ its own output for inspection."
 **Cell 4 — Imports and config**:
 
 ```python
-from codenames_interpretability.contract import CONTRACT_V1
-from codenames_interpretability.data import (
+from codenames.contract import CONTRACT_V1
+from codenames.data import (
     load_dataset, sample_turns, GIVER_COLS, extract_giver_features
 )
-from codenames_interpretability.models.<NAME> import load_<NAME>
-from codenames_interpretability.loop import run_extraction
-from codenames_interpretability.sanity import (
+from codenames.models.<NAME> import load_<NAME>
+from codenames.loop import run_extraction
+from codenames.sanity import (
     sc1_prompt_structure, sc2_span_coverage, sc3_anisotropy,
     sc4_behavioral_accuracy, sc5_layer_margin_curve,
     sc6_positional_confound, sc7_shuffle_decomposition,
 )
 # Only for causal models:
-from codenames_interpretability.generation import generate_response
+from codenames.generation import generate_response
 
 DATASET_PATH = "/content/drive/MyDrive/TCC/clue_generation.csv"
 ```
@@ -1280,7 +1280,7 @@ sc7_shuffle_decomposition(
 **Cell 15 — Output summary**:
 
 ```python
-from codenames_interpretability.persistence import print_output_summary
+from codenames.persistence import print_output_summary
 print_output_summary(
     base_dir=BASE_DIR, prefix=meta["prefix"], contract=CONTRACT_V1,
     has_generation=meta["supports_generation"],
@@ -1298,14 +1298,14 @@ print_output_summary(
   the user does not proceed to Cell 6. **Read the pre-flight cell of the
   reference Random Qwen notebook** to extract the diagnostic logic. The
   function should be exposed as
-  `codenames_interpretability.diagnostics.preflight_random_init` (the
+  `codenames.diagnostics.preflight_random_init` (the
   agent creates this module as well, with the diagnostic as a single
   function, ported verbatim from the reference notebook).
   In Path A, the pre-flight check is invoked separately as
   `!codenames-experiment preflight --model qwen_random ...` before the
   full `run` command.
 - **Encoder notebooks** (BERT, BERT Random, T5, ModernBERT) omit the
-  `from codenames_interpretability.generation import generate_response`
+  `from codenames.generation import generate_response`
   import in Path B's Cell 4 and pass `generation_fn=None` to
   `run_extraction`. In Path A, no flag is needed — the CLI dispatches
   generation based on the model's `supports_generation` metadata.

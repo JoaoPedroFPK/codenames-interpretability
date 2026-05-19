@@ -1,7 +1,7 @@
 # Experimental contract (CONTRACT_v1.0)
 
 The values below are fixed for the duration of this study. They are codified
-in `codenames_interpretability/contract.py` as a frozen dataclass
+in `codenames/contract.py` as a frozen dataclass
 (`Contract`) with a single canonical instance (`CONTRACT_V1`). Do not mutate
 the contract during a run; if a parameter needs to change, increment the
 version (`v1.1`, `v2`, etc.) and document the change here.

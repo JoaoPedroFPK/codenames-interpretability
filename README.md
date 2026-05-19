@@ -49,7 +49,7 @@ the geometric organisation of its representations.
 
 ```
 codenames-interpretability/
-├── codenames_interpretability/     # The Python package — the methodology
+├── codenames/     # The Python package — the methodology
 │   ├── contract.py                 # Frozen experimental parameters
 │   ├── data.py                     # Dataset loading and sampling
 │   ├── prompts.py                  # Byte-identical prompt construction
@@ -266,7 +266,7 @@ one 7B model is in GPU memory at a time.
 | Ch. 4.7: Generation–Geometry Concordance | `generation.py`, `sanity.py` (SC4 concordance block) |
 | Ch. 4.8: Implementation and Reproducibility | `contract.py`, all of the above |
 
-The model loaders in `codenames_interpretability/models/` are not
+The model loaders in `codenames/models/` are not
 described in any individual thesis section; they are the operational
 realisations of the model suite described in Chapter 4.2 (The Model
 Suite).
@@ -285,26 +285,6 @@ Colab provides; other models work with earlier versions.
 GPU memory: the seven-billion-parameter causal models (Mistral, Qwen,
 Random Qwen) require a GPU with at least 16 GB of memory. The
 encoder-only models run on Colab's free-tier GPU.
-
----
-
-## Citation
-
-If you use or build on this work, please cite the thesis:
-
-```bibtex
-@thesis{<surname>2026geometry,
-  author       = {John <Surname>},
-  title        = {Layer-wise Word Representation Geometry in
-                  Transformer Language Models},
-  type         = {Undergraduate Thesis},
-  institution  = {<University>},
-  year         = {2026},
-}
-```
-
-The repository itself can be cited via the `CITATION.cff` file in the
-repository root once added.
 
 ---
 

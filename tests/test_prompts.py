@@ -5,7 +5,7 @@ chat-template strategies. The chatml strategy is tested with a stub
 tokenizer; the real tokenizers aren't loaded.
 """
 
-from codenames_interpretability.prompts import (
+from codenames.prompts import (
     _FEATURE_LABEL_MAP,
     _format_feature_value,
     build_instruction_body,

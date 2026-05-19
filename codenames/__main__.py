@@ -1,4 +1,4 @@
-"""Allow ``python -m codenames_interpretability`` as an alternative to the
+"""Allow ``python -m codenames`` as an alternative to the
 console script ``codenames-experiment``. Useful in Colab when the
 ``pip install -e .`` console-script shim isn't on PATH yet.
 """
