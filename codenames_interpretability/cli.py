@@ -80,6 +80,13 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
                    help="Skip SC1-SC7 after extraction.")
     p.add_argument("--no-generation", action="store_true",
                    help="Disable generation phase for causal models (no effect on encoders).")
+    # --- Acceleration flags (default off; characterise tolerance with `compare` first) ---
+    p.add_argument("--vectorize-anisotropy", action="store_true",
+                   help="Use vectorized M @ M.T for all-pairs anisotropy. ~1e-6 drift on aniso aggregates.")
+    p.add_argument("--flash-attn", action="store_true",
+                   help="Load causal models (Mistral, Qwen) with attn_implementation='flash_attention_2'.")
+    p.add_argument("--batch-size", type=int, default=1,
+                   help="Boards per forward pass (default: 1 = reference). Higher = faster, slight fp16 drift.")
     return p
 
 
@@ -167,7 +174,7 @@ def _make_sanity_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentPa
 # ---------------------------------------------------------------------------
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from .contract import CONTRACT_V1, Contract
+    from .contract import Acceleration, CONTRACT_V1, Contract
     from .data import load_dataset, sample_turns
     from .generation import generate_response
     from .loop import run_extraction
@@ -192,7 +199,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         contract = CONTRACT_V1
 
-    model, tokenizer, meta = loader()
+    acceleration = Acceleration(
+        vectorize_anisotropy=args.vectorize_anisotropy,
+        flash_attention_for_causal=args.flash_attn,
+        batch_size=args.batch_size,
+    )
+
+    # Load the model with FA2 if requested and supported.
+    if acceleration.flash_attention_for_causal and args.model in ("mistral", "qwen"):
+        print(f"Loading model with attn_implementation='flash_attention_2'")
+        model, tokenizer, meta = loader(attn_implementation="flash_attention_2")
+    else:
+        model, tokenizer, meta = loader()
+
     df = load_dataset(args.dataset)
     df_sample = sample_turns(df, n=contract.sample_size, seed=contract.random_seed)
 
@@ -214,6 +233,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         device=meta["device"],
         has_generation=has_generation,
         generation_fn=generation_fn,
+        acceleration=acceleration,
     )
 
     if not args.skip_sanity_checks:
