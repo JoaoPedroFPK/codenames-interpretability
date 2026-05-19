@@ -375,11 +375,27 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
-    """Reference path vs accelerated path on a small subsample."""
+    """Reference path vs accelerated path on a small subsample.
+
+    When ``--flash-attn`` is requested for a causal model (mistral, qwen),
+    the two passes use different model loads (eager vs FA2). To avoid
+    holding two 7B models simultaneously, the reference model is freed
+    before loading the fast model. The two passes write results to disk
+    independently and are diffed at the end.
+
+    Otherwise (vectorize_anisotropy and/or batch_size > 1 only), a single
+    model is loaded and used for both passes.
+    """
+    import gc
+
+    import torch
+
+    from .comparison import _diff_general, _diff_metrics, _print_summary
     from .contract import ACCEL_REFERENCE, Acceleration, CONTRACT_V1, Contract
     from .comparison import compare_runs
     from .data import load_dataset, sample_turns
     from .generation import generate_response
+    from .loop import run_extraction
 
     loader = _resolve_loader(args.model)
 
@@ -401,52 +417,96 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
     )
 
-    # Reference model: default attn_implementation (eager for causal,
-    # whatever the loader picks for ModernBERT).
-    print(f"Loading reference model: {args.model}")
-    try:
-        model_ref, tokenizer_ref, meta_ref = loader()
-    except TypeError:
-        # Loader may not yet accept attn_implementation kwarg. Fall back.
-        model_ref, tokenizer_ref, meta_ref = loader()
-
-    # Fast model: if FA2 is requested AND the loader supports it, reload.
-    # Otherwise the same model object is reused.
-    if fast_accel.flash_attention_for_causal and args.model in ("mistral", "qwen"):
-        print(f"Loading fast-path model with attn_implementation='flash_attention_2'")
-        try:
-            model_fast, tokenizer_fast, _ = loader(attn_implementation="flash_attention_2")
-        except TypeError:
-            print(
-                "WARNING: this loader does not yet accept attn_implementation; "
-                "falling back to a single shared model for both passes. "
-                "Flash Attention 2 effect will not be measured."
-            )
-            model_fast, tokenizer_fast = model_ref, tokenizer_ref
-    else:
-        model_fast, tokenizer_fast = model_ref, tokenizer_ref
+    wants_fa2_reload = args.flash_attn and args.model in ("mistral", "qwen")
 
     df = load_dataset(args.dataset)
     df_sample = sample_turns(df, n=args.n, seed=CONTRACT_V1.random_seed)
 
-    compare_runs(
-        model_ref=model_ref,
-        tokenizer_ref=tokenizer_ref,
-        model_fast=model_fast,
-        tokenizer_fast=tokenizer_fast,
+    if not wants_fa2_reload:
+        # Single-model path: vectorize_anisotropy and/or batch_size only.
+        print(f"Loading model (single load for both passes): {args.model}")
+        model, tokenizer, meta = loader()
+        compare_runs(
+            model_ref=model,
+            tokenizer_ref=tokenizer,
+            model_fast=model,
+            tokenizer_fast=tokenizer,
+            df=df_sample,
+            prefix=meta["prefix"],
+            contract=contract,
+            chat_template_strategy=meta["chat_template_strategy"],
+            forward_hidden_states_mode=meta["forward_hidden_states_mode"],
+            use_truncation=meta["use_truncation"],
+            num_layers=meta["num_layers"],
+            hidden_dim=meta["hidden_dim"],
+            device=meta["device"],
+            has_generation=meta["supports_generation"],
+            generation_fn=generate_response if meta["supports_generation"] else None,
+            fast_acceleration=fast_accel,
+        )
+        return 0
+
+    # --- FA2 path: two separate model loads, free between passes ---
+    import os
+    import tempfile
+
+    tmp_base_dir = tempfile.mkdtemp(prefix="cnames_compare_fa2_")
+    ref_dir = os.path.join(tmp_base_dir, "ref")
+    fast_dir = os.path.join(tmp_base_dir, "fast")
+    os.makedirs(ref_dir, exist_ok=True)
+    os.makedirs(fast_dir, exist_ok=True)
+
+    print(f"[1/2] Loading reference model (eager attention): {args.model}")
+    model, tokenizer, meta = loader()
+    print("[1/2] Running reference path on N={} boards".format(args.n))
+    ref_results = run_extraction(
+        model=model,
+        tokenizer=tokenizer,
         df=df_sample,
-        prefix=meta_ref["prefix"],
+        base_dir=ref_dir,
+        prefix=meta["prefix"],
         contract=contract,
-        chat_template_strategy=meta_ref["chat_template_strategy"],
-        forward_hidden_states_mode=meta_ref["forward_hidden_states_mode"],
-        use_truncation=meta_ref["use_truncation"],
-        num_layers=meta_ref["num_layers"],
-        hidden_dim=meta_ref["hidden_dim"],
-        device=meta_ref["device"],
-        has_generation=meta_ref["supports_generation"],
-        generation_fn=generate_response if meta_ref["supports_generation"] else None,
-        fast_acceleration=fast_accel,
+        chat_template_strategy=meta["chat_template_strategy"],
+        forward_hidden_states_mode=meta["forward_hidden_states_mode"],
+        use_truncation=meta["use_truncation"],
+        num_layers=meta["num_layers"],
+        hidden_dim=meta["hidden_dim"],
+        device=meta["device"],
+        has_generation=meta["supports_generation"],
+        generation_fn=generate_response if meta["supports_generation"] else None,
+        acceleration=ACCEL_REFERENCE,
     )
+    print("[1/2] Reference pass complete. Freeing reference model before FA2 load.")
+    del model, tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(f"[2/2] Loading fast model (flash_attention_2): {args.model}")
+    model_fast, tokenizer_fast, meta_fast = loader(attn_implementation="flash_attention_2")
+    print("[2/2] Running fast path on N={} boards".format(args.n))
+    fast_results = run_extraction(
+        model=model_fast,
+        tokenizer=tokenizer_fast,
+        df=df_sample,
+        base_dir=fast_dir,
+        prefix=meta_fast["prefix"],
+        contract=contract,
+        chat_template_strategy=meta_fast["chat_template_strategy"],
+        forward_hidden_states_mode=meta_fast["forward_hidden_states_mode"],
+        use_truncation=meta_fast["use_truncation"],
+        num_layers=meta_fast["num_layers"],
+        hidden_dim=meta_fast["hidden_dim"],
+        device=meta_fast["device"],
+        has_generation=meta_fast["supports_generation"],
+        generation_fn=generate_response if meta_fast["supports_generation"] else None,
+        acceleration=fast_accel,
+    )
+
+    general_report = _diff_general(ref_results, fast_results)
+    metrics_report = _diff_metrics(ref_results, fast_results)
+    _print_summary("general_df", general_report)
+    _print_summary("metrics_df", metrics_report)
     return 0
 
 

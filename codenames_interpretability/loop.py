@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 
 from .contract import ACCEL_REFERENCE, Acceleration, Contract
 from .data import GIVER_COLS, extract_giver_features
-from .extraction import run_instance
+from .extraction import run_instance, run_instance_batched
 from .persistence import (
     save_general_csv,
     save_generation_csv,
@@ -114,101 +114,36 @@ def run_extraction(
         boards_in_shard = 0
         shard_paths = []
 
-        for board_idx, (_, row) in enumerate(
-            tqdm(df_sample.iterrows(), total=len(df_sample), desc=mode_name)
-        ):
-            row_id = int(row["row_id"])
-            canonical_candidates = list(row["candidates"])  # alphabetical
+        if acceleration.batch_size > 1:
+            # --- Batched code path (acceleration.batch_size > 1) ---
+            # Group boards into chunks of `batch_size`. For each chunk:
+            #   1. Canonical (permutation_id=0) for all boards in the chunk → 1 forward pass
+            #   2. Generation for canonical boards (one at a time; can't easily batch)
+            #   3. For each shuffle k: shuffle-k for all boards in the chunk → 1 forward pass
+            # Per-board error handling: if the whole batch raises, log all
+            # boards in the batch with the same error and continue.
+            n_boards = len(df_sample)
+            rows_list = [row for _, row in df_sample.iterrows()]
+            for chunk_start in tqdm(
+                range(0, n_boards, acceleration.batch_size),
+                desc=f"{mode_name} (batched)",
+            ):
+                chunk_end = min(chunk_start + acceleration.batch_size, n_boards)
+                chunk_rows = rows_list[chunk_start:chunk_end]
+                chunk_indices = list(range(chunk_start, chunk_end))
+                chunk_canonical = [list(r["candidates"]) for r in chunk_rows]
+                chunk_row_ids = [int(r["row_id"]) for r in chunk_rows]
+                chunk_save_vecs = [rid in subsample_ids for rid in chunk_row_ids]
 
-            # ==============================================================
-            # Canonical ordering (permutation_id = 0)
-            # ==============================================================
-            try:
-                save_vecs = (row_id in subsample_ids)
-
-                g, m, v = run_instance(
-                    row=row,
-                    giver_cols=GIVER_COLS,
-                    use_social_context=mode_flag,
-                    candidates_order=canonical_candidates,
-                    permutation_id=0,
-                    save_vectors=save_vecs,
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=device,
-                    pooling_methods=pooling_methods,
-                    num_layers=num_layers,
-                    hidden_dim=hidden_dim,
-                    chat_template_strategy=chat_template_strategy,
-                    forward_hidden_states_mode=forward_hidden_states_mode,
-                    use_truncation=use_truncation,
-                    max_seq_len=max_seq_len,
-                    acceleration=acceleration,
-                )
-                general_records.append(g)
-                metrics_buffer.extend(m)
-                if v is not None:
-                    vector_records_all.extend(v)
-
-                # --- Generation (canonical ordering only, causal-only) ---
-                if has_generation and generation_fn is not None:
-                    prompt_for_gen, _ = build_prompt(
-                        hint=str(row["output"]),
-                        candidates=canonical_candidates,
-                        giver_features=(
-                            extract_giver_features(row, GIVER_COLS)
-                            if mode_flag else {}
-                        ),
-                        use_social_context=mode_flag,
-                        tokenizer=tokenizer,
-                        chat_template_strategy=chat_template_strategy,
-                    )
-                    gen_result = generation_fn(
-                        prompt=prompt_for_gen,
-                        candidates=canonical_candidates,
-                        max_new_tokens=generation_max_tokens,
-                        model=model,
-                        tokenizer=tokenizer,
-                        device=device,
-                    )
-                    gen_record = {
-                        "row_id"                  : row_id,
-                        "use_social_context"      : mode_flag,
-                        "generated_text"          : gen_result["generated_text"],
-                        "generated_word"          : gen_result["generated_word"],
-                        "generated_in_candidates" : gen_result["generated_in_candidates"],
-                        "generated_correct"       : (
-                            gen_result["generated_word"] in set(row["targets"])
-                            if gen_result["generated_word"] else False
-                        ),
-                    }
-                    for pm in pooling_methods:
-                        gen_record[f"concordance_{pm}"] = (
-                            gen_result["generated_word"] == g[f"predicted_word_{pm}"]
-                            if gen_result["generated_word"] else False
-                        )
-                    generation_records.append(gen_record)
-
-            except Exception as e:
-                error_log.append({"row_id": row_id, "error": str(e), "permutation_id": 0})
-                print(f"  ERROR row_id={row_id} perm=0: {e}")
-
-            # ==============================================================
-            # Shuffle permutations (permutation_id = 1..K)
-            # ==============================================================
-            for k in range(n_shuffles):
+                # 1. Canonical batch
                 try:
-                    perm_rng = np.random.RandomState(int(shuffle_seeds[board_idx, k]))
-                    shuffled_candidates = list(canonical_candidates)
-                    perm_rng.shuffle(shuffled_candidates)
-
-                    g_shuf, m_shuf, _ = run_instance(
-                        row=row,
+                    batch_results = run_instance_batched(
+                        rows=chunk_rows,
                         giver_cols=GIVER_COLS,
                         use_social_context=mode_flag,
-                        candidates_order=shuffled_candidates,
-                        permutation_id=k + 1,
-                        save_vectors=False,
+                        candidates_orders=chunk_canonical,
+                        permutation_ids=[0] * len(chunk_rows),
+                        save_vectors_flags=chunk_save_vecs,
                         model=model,
                         tokenizer=tokenizer,
                         device=device,
@@ -221,25 +156,246 @@ def run_extraction(
                         max_seq_len=max_seq_len,
                         acceleration=acceleration,
                     )
-                    general_records.append(g_shuf)
-                    metrics_buffer.extend(m_shuf)
+                    canonical_general_per_board = []
+                    for board_idx_in_chunk, (g, m, v) in enumerate(batch_results):
+                        general_records.append(g)
+                        metrics_buffer.extend(m)
+                        if v is not None:
+                            vector_records_all.extend(v)
+                        canonical_general_per_board.append(g)
                 except Exception as e:
-                    error_log.append({"row_id": row_id, "error": str(e), "permutation_id": k + 1})
-                    print(f"  ERROR row_id={row_id} perm={k+1}: {e}")
+                    print(f"  ERROR batch (canonical) row_ids={chunk_row_ids}: {e}")
+                    for rid in chunk_row_ids:
+                        error_log.append({"row_id": rid, "error": str(e), "permutation_id": 0})
+                    canonical_general_per_board = [None] * len(chunk_rows)
 
-            # --- Shard flush check (INLINE) ---
-            boards_in_shard += 1
-            if boards_in_shard >= shard_boards and metrics_buffer:
-                shard_path = os.path.join(
-                    base_dir,
-                    f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
-                )
-                pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
-                shard_paths.append(shard_path)
-                metrics_buffer = []
-                shard_idx += 1
-                boards_in_shard = 0
-                gc.collect()
+                # 2. Generation (one at a time, per board)
+                if has_generation and generation_fn is not None:
+                    for board_idx_in_chunk, row in enumerate(chunk_rows):
+                        g = canonical_general_per_board[board_idx_in_chunk]
+                        if g is None:
+                            continue
+                        rid = chunk_row_ids[board_idx_in_chunk]
+                        try:
+                            prompt_for_gen, _ = build_prompt(
+                                hint=str(row["output"]),
+                                candidates=chunk_canonical[board_idx_in_chunk],
+                                giver_features=(
+                                    extract_giver_features(row, GIVER_COLS)
+                                    if mode_flag else {}
+                                ),
+                                use_social_context=mode_flag,
+                                tokenizer=tokenizer,
+                                chat_template_strategy=chat_template_strategy,
+                            )
+                            gen_result = generation_fn(
+                                prompt=prompt_for_gen,
+                                candidates=chunk_canonical[board_idx_in_chunk],
+                                max_new_tokens=generation_max_tokens,
+                                model=model,
+                                tokenizer=tokenizer,
+                                device=device,
+                            )
+                            gen_record = {
+                                "row_id"                  : rid,
+                                "use_social_context"      : mode_flag,
+                                "generated_text"          : gen_result["generated_text"],
+                                "generated_word"          : gen_result["generated_word"],
+                                "generated_in_candidates" : gen_result["generated_in_candidates"],
+                                "generated_correct"       : (
+                                    gen_result["generated_word"] in set(row["targets"])
+                                    if gen_result["generated_word"] else False
+                                ),
+                            }
+                            for pm in pooling_methods:
+                                gen_record[f"concordance_{pm}"] = (
+                                    gen_result["generated_word"] == g[f"predicted_word_{pm}"]
+                                    if gen_result["generated_word"] else False
+                                )
+                            generation_records.append(gen_record)
+                        except Exception as e:
+                            error_log.append({"row_id": rid, "error": f"generation: {e}", "permutation_id": 0})
+                            print(f"  ERROR generation row_id={rid}: {e}")
+
+                # 3. Shuffles
+                for k in range(n_shuffles):
+                    shuffled_orders = []
+                    for board_idx_local, board_idx_global in enumerate(chunk_indices):
+                        perm_rng = np.random.RandomState(int(shuffle_seeds[board_idx_global, k]))
+                        shuffled = list(chunk_canonical[board_idx_local])
+                        perm_rng.shuffle(shuffled)
+                        shuffled_orders.append(shuffled)
+
+                    try:
+                        batch_results = run_instance_batched(
+                            rows=chunk_rows,
+                            giver_cols=GIVER_COLS,
+                            use_social_context=mode_flag,
+                            candidates_orders=shuffled_orders,
+                            permutation_ids=[k + 1] * len(chunk_rows),
+                            save_vectors_flags=[False] * len(chunk_rows),
+                            model=model,
+                            tokenizer=tokenizer,
+                            device=device,
+                            pooling_methods=pooling_methods,
+                            num_layers=num_layers,
+                            hidden_dim=hidden_dim,
+                            chat_template_strategy=chat_template_strategy,
+                            forward_hidden_states_mode=forward_hidden_states_mode,
+                            use_truncation=use_truncation,
+                            max_seq_len=max_seq_len,
+                            acceleration=acceleration,
+                        )
+                        for g_shuf, m_shuf, _ in batch_results:
+                            general_records.append(g_shuf)
+                            metrics_buffer.extend(m_shuf)
+                    except Exception as e:
+                        print(f"  ERROR batch (perm={k+1}) row_ids={chunk_row_ids}: {e}")
+                        for rid in chunk_row_ids:
+                            error_log.append({"row_id": rid, "error": str(e), "permutation_id": k + 1})
+
+                # Shard flush check — increment per board in the chunk.
+                boards_in_shard += len(chunk_rows)
+                if boards_in_shard >= shard_boards and metrics_buffer:
+                    shard_path = os.path.join(
+                        base_dir,
+                        f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
+                    )
+                    pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
+                    shard_paths.append(shard_path)
+                    metrics_buffer = []
+                    shard_idx += 1
+                    boards_in_shard = 0
+                    gc.collect()
+
+        else:
+            # --- Reference per-board code path (acceleration.batch_size == 1) ---
+            for board_idx, (_, row) in enumerate(
+                tqdm(df_sample.iterrows(), total=len(df_sample), desc=mode_name)
+            ):
+                row_id = int(row["row_id"])
+                canonical_candidates = list(row["candidates"])  # alphabetical
+
+                # ==============================================================
+                # Canonical ordering (permutation_id = 0)
+                # ==============================================================
+                try:
+                    save_vecs = (row_id in subsample_ids)
+
+                    g, m, v = run_instance(
+                        row=row,
+                        giver_cols=GIVER_COLS,
+                        use_social_context=mode_flag,
+                        candidates_order=canonical_candidates,
+                        permutation_id=0,
+                        save_vectors=save_vecs,
+                        model=model,
+                        tokenizer=tokenizer,
+                        device=device,
+                        pooling_methods=pooling_methods,
+                        num_layers=num_layers,
+                        hidden_dim=hidden_dim,
+                        chat_template_strategy=chat_template_strategy,
+                        forward_hidden_states_mode=forward_hidden_states_mode,
+                        use_truncation=use_truncation,
+                        max_seq_len=max_seq_len,
+                        acceleration=acceleration,
+                    )
+                    general_records.append(g)
+                    metrics_buffer.extend(m)
+                    if v is not None:
+                        vector_records_all.extend(v)
+
+                    # --- Generation (canonical ordering only, causal-only) ---
+                    if has_generation and generation_fn is not None:
+                        prompt_for_gen, _ = build_prompt(
+                            hint=str(row["output"]),
+                            candidates=canonical_candidates,
+                            giver_features=(
+                                extract_giver_features(row, GIVER_COLS)
+                                if mode_flag else {}
+                            ),
+                            use_social_context=mode_flag,
+                            tokenizer=tokenizer,
+                            chat_template_strategy=chat_template_strategy,
+                        )
+                        gen_result = generation_fn(
+                            prompt=prompt_for_gen,
+                            candidates=canonical_candidates,
+                            max_new_tokens=generation_max_tokens,
+                            model=model,
+                            tokenizer=tokenizer,
+                            device=device,
+                        )
+                        gen_record = {
+                            "row_id"                  : row_id,
+                            "use_social_context"      : mode_flag,
+                            "generated_text"          : gen_result["generated_text"],
+                            "generated_word"          : gen_result["generated_word"],
+                            "generated_in_candidates" : gen_result["generated_in_candidates"],
+                            "generated_correct"       : (
+                                gen_result["generated_word"] in set(row["targets"])
+                                if gen_result["generated_word"] else False
+                            ),
+                        }
+                        for pm in pooling_methods:
+                            gen_record[f"concordance_{pm}"] = (
+                                gen_result["generated_word"] == g[f"predicted_word_{pm}"]
+                                if gen_result["generated_word"] else False
+                            )
+                        generation_records.append(gen_record)
+
+                except Exception as e:
+                    error_log.append({"row_id": row_id, "error": str(e), "permutation_id": 0})
+                    print(f"  ERROR row_id={row_id} perm=0: {e}")
+
+                # ==============================================================
+                # Shuffle permutations (permutation_id = 1..K)
+                # ==============================================================
+                for k in range(n_shuffles):
+                    try:
+                        perm_rng = np.random.RandomState(int(shuffle_seeds[board_idx, k]))
+                        shuffled_candidates = list(canonical_candidates)
+                        perm_rng.shuffle(shuffled_candidates)
+
+                        g_shuf, m_shuf, _ = run_instance(
+                            row=row,
+                            giver_cols=GIVER_COLS,
+                            use_social_context=mode_flag,
+                            candidates_order=shuffled_candidates,
+                            permutation_id=k + 1,
+                            save_vectors=False,
+                            model=model,
+                            tokenizer=tokenizer,
+                            device=device,
+                            pooling_methods=pooling_methods,
+                            num_layers=num_layers,
+                            hidden_dim=hidden_dim,
+                            chat_template_strategy=chat_template_strategy,
+                            forward_hidden_states_mode=forward_hidden_states_mode,
+                            use_truncation=use_truncation,
+                            max_seq_len=max_seq_len,
+                            acceleration=acceleration,
+                        )
+                        general_records.append(g_shuf)
+                        metrics_buffer.extend(m_shuf)
+                    except Exception as e:
+                        error_log.append({"row_id": row_id, "error": str(e), "permutation_id": k + 1})
+                        print(f"  ERROR row_id={row_id} perm={k+1}: {e}")
+
+                # --- Shard flush check (INLINE) ---
+                boards_in_shard += 1
+                if boards_in_shard >= shard_boards and metrics_buffer:
+                    shard_path = os.path.join(
+                        base_dir,
+                        f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
+                    )
+                    pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
+                    shard_paths.append(shard_path)
+                    metrics_buffer = []
+                    shard_idx += 1
+                    boards_in_shard = 0
+                    gc.collect()
 
         # --- Final flush of remaining buffer (INLINE) ---
         if metrics_buffer:

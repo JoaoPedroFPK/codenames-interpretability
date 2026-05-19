@@ -183,16 +183,83 @@ def run_instance(
             "Expected one of: 'causal', 'encoder_load_time', 'encoder_inference'."
         )
 
-    hidden_states = outputs.hidden_states
+    # Extract per-board hidden states (drop the singleton batch dim) and
+    # delegate the rest of the work to the shared finalize helper. This
+    # helper is also used by the batched code path; see _run_instance_batched.
+    hidden_states_one_board = tuple(outputs.hidden_states[layer][0]
+                                    for layer in range(num_layers + 1))
 
-    # ================================================================
-    # Compute metrics across ALL layers, for ALL pooling methods
-    # ================================================================
+    general_record, metrics_records, vector_records = _finalize_board(
+        hidden_states_one_board=hidden_states_one_board,
+        row_id=row_id,
+        hint=hint,
+        candidates=candidates,
+        targets=targets,
+        black=black,
+        tan=tan,
+        spans=spans,
+        feature_markers=feature_markers,
+        use_social_context=use_social_context,
+        permutation_id=permutation_id,
+        save_vectors=save_vectors,
+        prompt_token_count=prompt_token_count,
+        truncated=truncated,
+        giver_features=giver_features,
+        pooling_methods=pooling_methods,
+        num_layers=num_layers,
+        use_truncation=use_truncation,
+        acceleration=acceleration,
+    )
+
+    del outputs, hidden_states_one_board
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    return general_record, metrics_records, vector_records
+
+
+def _finalize_board(
+    *,
+    hidden_states_one_board,
+    row_id: int,
+    hint: str,
+    candidates: List[str],
+    targets,
+    black,
+    tan,
+    spans: Dict[str, Tuple[int, int]],
+    feature_markers: Dict[str, str],
+    use_social_context: bool,
+    permutation_id: int,
+    save_vectors: bool,
+    prompt_token_count: int,
+    truncated: bool,
+    giver_features: Dict,
+    pooling_methods: Tuple[str, ...],
+    num_layers: int,
+    use_truncation: bool,
+    acceleration: Acceleration,
+) -> Tuple[Dict, List[Dict], Optional[List[Dict]]]:
+    """Compute records for one board given its per-layer hidden states.
+
+    ``hidden_states_one_board`` is a tuple of ``num_layers + 1`` tensors,
+    each shape ``[seq_len, hidden_dim]`` (no batch dimension). All other
+    arguments are the per-board state computed before the forward pass.
+
+    Shared between :func:`run_instance` (single-board path) and
+    :func:`_run_instance_batched` (batched path).
+    """
+    candidate_position_map = {w: i for i, w in enumerate(candidates)}
+
     metrics_records: List[Dict] = []
     vector_records: Optional[List[Dict]] = [] if save_vectors else None
 
+    cosines_per_method: Dict[str, Dict[str, float]] = {}
+    ranks_per_method: Dict[str, Dict[str, float]] = {}
+    cand_meta: Dict[str, Dict] = {}
+
     for layer_idx in range(num_layers + 1):
-        layer_hs = hidden_states[layer_idx][0]
+        layer_hs = hidden_states_one_board[layer_idx]
 
         # --- Pool hint vector ---
         hint_vecs = {pm: pool_span(layer_hs, spans["hint"], method=pm)
@@ -497,11 +564,6 @@ def run_instance(
 
     missing_spans = [c for c in candidates if f"cand:{c}" not in spans]
 
-    # --- Memory cleanup ---
-    del hidden_states, outputs, layer_hs
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
     general_record: Dict = {
         "row_id"             : row_id,
         "hint"               : hint,
@@ -527,3 +589,209 @@ def run_instance(
     general_record.update(distance_metrics)
 
     return general_record, metrics_records, vector_records
+
+
+def run_instance_batched(
+    rows: List[pd.Series],
+    giver_cols: List[str],
+    use_social_context: bool,
+    candidates_orders: List[List[str]],
+    permutation_ids: List[int],
+    save_vectors_flags: List[bool],
+    *,
+    model,
+    tokenizer,
+    device: str,
+    pooling_methods: Tuple[str, ...],
+    num_layers: int,
+    hidden_dim: int,
+    chat_template_strategy: str,
+    forward_hidden_states_mode: str,
+    use_truncation: bool,
+    max_seq_len: int = 512,
+    acceleration: Acceleration = ACCEL_REFERENCE,
+) -> List[Tuple[Dict, List[Dict], Optional[List[Dict]]]]:
+    """Process a list of boards in a single batched forward pass.
+
+    All boards in one call share ``use_social_context`` (one condition per
+    call). They can have different ``candidates_orders`` (canonical or
+    shuffled), different ``permutation_ids``, and different
+    ``save_vectors_flags``.
+
+    Per-board tokenization happens individually (so each board gets its own
+    ``offset_mapping``), then prompts are padded to a common max length and
+    sent through the model in one forward pass. The hidden states are then
+    sliced per board and ``_finalize_board`` is called on each slice.
+
+    Boards in the same batch share fp16 attention reductions over the
+    sequence dimension, which is the source of the per-cell drift vs the
+    single-board reference path. The comparison harness quantifies this.
+    """
+    assert len(rows) == len(candidates_orders) == len(permutation_ids) == len(save_vectors_flags)
+    if len(rows) == 0:
+        return []
+
+    # --- Per-board pre-forward state (separate tokenization for offset_mapping) ---
+    per_board_state = []
+    prompts: List[str] = []
+    token_lengths: List[int] = []
+
+    for row, candidates_order in zip(rows, candidates_orders):
+        row_id = int(row["row_id"])
+        hint = str(row["output"])
+        candidates = list(candidates_order)
+        targets = set(row["targets"])
+        black = set(row["black"])
+        tan = set(row["tan"])
+
+        giver_features = (
+            extract_giver_features(row, giver_cols)
+            if use_social_context else {}
+        )
+
+        prompt, feature_markers = build_prompt(
+            hint=hint,
+            candidates=candidates,
+            giver_features=giver_features,
+            use_social_context=use_social_context,
+            tokenizer=tokenizer,
+            chat_template_strategy=chat_template_strategy,
+        )
+
+        # Per-board tokenization solely to obtain offset_mapping (which the
+        # tokenizer only emits without padding). The actual model input is
+        # built below from the padded batch.
+        if use_truncation:
+            single_inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                return_offsets_mapping=True,
+                max_length=max_seq_len,
+                truncation=True,
+            )
+        else:
+            single_inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                return_offsets_mapping=True,
+            )
+        offset_mapping = single_inputs["offset_mapping"][0].tolist()
+        prompt_token_count = int(single_inputs["input_ids"].shape[1])
+        truncated = use_truncation and (prompt_token_count >= max_seq_len)
+
+        spans_to_find = {"hint": hint}
+        for c in candidates:
+            spans_to_find[f"cand:{c}"] = c
+        if use_social_context:
+            for k, marker in feature_markers.items():
+                spans_to_find[f"giver:{k}"] = marker
+        spans = find_token_spans(prompt, offset_mapping, spans_to_find)
+
+        if "hint" not in spans:
+            raise ValueError(
+                f"Hint span not found for row_id={row_id}, hint='{hint}'."
+            )
+
+        per_board_state.append({
+            "row_id": row_id,
+            "hint": hint,
+            "candidates": candidates,
+            "targets": targets,
+            "black": black,
+            "tan": tan,
+            "spans": spans,
+            "feature_markers": feature_markers,
+            "giver_features": giver_features,
+            "prompt_token_count": prompt_token_count,
+            "truncated": truncated,
+        })
+        prompts.append(prompt)
+        token_lengths.append(prompt_token_count)
+
+    # --- Batched tokenization with padding ---
+    # Force right-padding for batched extraction so that
+    # hidden_states_batched[layer][board_idx, :seq_len, :] reliably indexes
+    # the real (unpadded) tokens of each board. Causal LM tokenizers
+    # (Mistral, Qwen) default to padding_side='left' for generation; we
+    # save and restore the original value to leave the tokenizer untouched
+    # for any downstream generation call.
+    _orig_padding_side = getattr(tokenizer, "padding_side", "right")
+    tokenizer.padding_side = "right"
+    try:
+        batch_inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=use_truncation,
+            max_length=max_seq_len if use_truncation else None,
+        ).to(device)
+    finally:
+        tokenizer.padding_side = _orig_padding_side
+
+    # --- Forward pass (same 3-way dispatch as run_instance) ---
+    if forward_hidden_states_mode == "causal":
+        with torch.no_grad():
+            outputs = model(
+                input_ids=batch_inputs["input_ids"],
+                attention_mask=batch_inputs["attention_mask"],
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    elif forward_hidden_states_mode == "encoder_load_time":
+        with torch.no_grad():
+            outputs = model(**batch_inputs)
+    elif forward_hidden_states_mode == "encoder_inference":
+        with torch.no_grad():
+            outputs = model(
+                **batch_inputs,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    else:
+        raise ValueError(
+            f"Unknown forward_hidden_states_mode: {forward_hidden_states_mode!r}. "
+            "Expected one of: 'causal', 'encoder_load_time', 'encoder_inference'."
+        )
+
+    # outputs.hidden_states is a tuple of length (num_layers + 1), each
+    # tensor of shape (batch_size, padded_seq_len, hidden_dim).
+    hidden_states_batched = outputs.hidden_states
+
+    # --- Per-board finalize ---
+    results: List[Tuple[Dict, List[Dict], Optional[List[Dict]]]] = []
+    for board_idx, state in enumerate(per_board_state):
+        seq_len = token_lengths[board_idx]
+        # Slice each layer's tensor: [board_idx, :seq_len, :].
+        hidden_states_one_board = tuple(
+            hidden_states_batched[layer][board_idx, :seq_len, :]
+            for layer in range(num_layers + 1)
+        )
+
+        general_record, metrics_records, vector_records = _finalize_board(
+            hidden_states_one_board=hidden_states_one_board,
+            row_id=state["row_id"],
+            hint=state["hint"],
+            candidates=state["candidates"],
+            targets=state["targets"],
+            black=state["black"],
+            tan=state["tan"],
+            spans=state["spans"],
+            feature_markers=state["feature_markers"],
+            use_social_context=use_social_context,
+            permutation_id=permutation_ids[board_idx],
+            save_vectors=save_vectors_flags[board_idx],
+            prompt_token_count=state["prompt_token_count"],
+            truncated=state["truncated"],
+            giver_features=state["giver_features"],
+            pooling_methods=pooling_methods,
+            num_layers=num_layers,
+            use_truncation=use_truncation,
+            acceleration=acceleration,
+        )
+        results.append((general_record, metrics_records, vector_records))
+
+    del outputs, hidden_states_batched, batch_inputs
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    return results
