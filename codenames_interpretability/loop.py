@@ -157,7 +157,17 @@ def run_extraction(
                         acceleration=acceleration,
                     )
                     canonical_general_per_board = []
-                    for board_idx_in_chunk, (g, m, v) in enumerate(batch_results):
+                    for board_idx_in_chunk, board_result in enumerate(batch_results):
+                        if board_result is None:
+                            rid = chunk_row_ids[board_idx_in_chunk]
+                            error_log.append({
+                                "row_id": rid,
+                                "error": "excluded from batch (pre-forward check failed)",
+                                "permutation_id": 0,
+                            })
+                            canonical_general_per_board.append(None)
+                            continue
+                        g, m, v = board_result
                         general_records.append(g)
                         metrics_buffer.extend(m)
                         if v is not None:
@@ -246,7 +256,16 @@ def run_extraction(
                             max_seq_len=max_seq_len,
                             acceleration=acceleration,
                         )
-                        for g_shuf, m_shuf, _ in batch_results:
+                        for board_idx_in_chunk, board_result in enumerate(batch_results):
+                            if board_result is None:
+                                rid = chunk_row_ids[board_idx_in_chunk]
+                                error_log.append({
+                                    "row_id": rid,
+                                    "error": "excluded from batch (pre-forward check failed)",
+                                    "permutation_id": k + 1,
+                                })
+                                continue
+                            g_shuf, m_shuf, _ = board_result
                             general_records.append(g_shuf)
                             metrics_buffer.extend(m_shuf)
                     except Exception as e:

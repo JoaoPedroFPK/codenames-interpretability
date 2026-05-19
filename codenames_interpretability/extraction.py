@@ -632,11 +632,15 @@ def run_instance_batched(
         return []
 
     # --- Per-board pre-forward state (separate tokenization for offset_mapping) ---
-    per_board_state = []
+    # Boards whose hint span fails are recorded as None in the output and
+    # skipped from the batched forward pass — matching the per-board path's
+    # error isolation (one bad board doesn't poison the whole chunk).
+    per_board_state: List[Optional[Dict]] = []  # one slot per input row; None on failure
     prompts: List[str] = []
     token_lengths: List[int] = []
+    active_indices: List[int] = []  # indices in `rows` that survived pre-forward checks
 
-    for row, candidates_order in zip(rows, candidates_orders):
+    for board_idx, (row, candidates_order) in enumerate(zip(rows, candidates_orders)):
         row_id = int(row["row_id"])
         hint = str(row["output"])
         candidates = list(candidates_order)
@@ -658,9 +662,6 @@ def run_instance_batched(
             chat_template_strategy=chat_template_strategy,
         )
 
-        # Per-board tokenization solely to obtain offset_mapping (which the
-        # tokenizer only emits without padding). The actual model input is
-        # built below from the padded batch.
         if use_truncation:
             single_inputs = tokenizer(
                 prompt,
@@ -688,9 +689,12 @@ def run_instance_batched(
         spans = find_token_spans(prompt, offset_mapping, spans_to_find)
 
         if "hint" not in spans:
-            raise ValueError(
-                f"Hint span not found for row_id={row_id}, hint='{hint}'."
+            print(
+                f"  WARN run_instance_batched: hint span not found for "
+                f"row_id={row_id}, hint='{hint}'. Excluding from batch."
             )
+            per_board_state.append(None)
+            continue
 
         per_board_state.append({
             "row_id": row_id,
@@ -707,6 +711,11 @@ def run_instance_batched(
         })
         prompts.append(prompt)
         token_lengths.append(prompt_token_count)
+        active_indices.append(board_idx)
+
+    if not prompts:
+        # All boards in the batch failed pre-forward checks. Return Nones.
+        return [None] * len(rows)  # type: ignore[list-item]
 
     # --- Batched tokenization with padding ---
     # Force right-padding for batched extraction so that
@@ -758,12 +767,16 @@ def run_instance_batched(
     hidden_states_batched = outputs.hidden_states
 
     # --- Per-board finalize ---
-    results: List[Tuple[Dict, List[Dict], Optional[List[Dict]]]] = []
-    for board_idx, state in enumerate(per_board_state):
-        seq_len = token_lengths[board_idx]
-        # Slice each layer's tensor: [board_idx, :seq_len, :].
+    # `results` is aligned with the input `rows`: position i corresponds to
+    # rows[i]. Boards that were excluded at pre-forward get None.
+    results: List[Optional[Tuple[Dict, List[Dict], Optional[List[Dict]]]]] = [None] * len(rows)
+    for batch_position, original_idx in enumerate(active_indices):
+        state = per_board_state[original_idx]
+        assert state is not None  # active_indices only includes survivors
+        seq_len = token_lengths[batch_position]
+        # Slice each layer's tensor: [batch_position, :seq_len, :].
         hidden_states_one_board = tuple(
-            hidden_states_batched[layer][board_idx, :seq_len, :]
+            hidden_states_batched[layer][batch_position, :seq_len, :]
             for layer in range(num_layers + 1)
         )
 
@@ -778,8 +791,8 @@ def run_instance_batched(
             spans=state["spans"],
             feature_markers=state["feature_markers"],
             use_social_context=use_social_context,
-            permutation_id=permutation_ids[board_idx],
-            save_vectors=save_vectors_flags[board_idx],
+            permutation_id=permutation_ids[original_idx],
+            save_vectors=save_vectors_flags[original_idx],
             prompt_token_count=state["prompt_token_count"],
             truncated=state["truncated"],
             giver_features=state["giver_features"],
@@ -788,10 +801,10 @@ def run_instance_batched(
             use_truncation=use_truncation,
             acceleration=acceleration,
         )
-        results.append((general_record, metrics_records, vector_records))
+        results[original_idx] = (general_record, metrics_records, vector_records)
 
     del outputs, hidden_states_batched, batch_inputs
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    return results
+    return results  # type: ignore[return-value]
