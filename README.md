@@ -4,9 +4,8 @@ Layer-wise word representation geometry across seven transformer
 architectures, evaluated on the Codenames Duet clue-guessing task. This
 repository contains the source code for the experiments reported in:
 
-> **John \<Surname\>.** *Layer-wise Word Representation Geometry in
-> Transformer Language Models.* Undergraduate thesis (TCC), \<University\>,
-> 2026.
+> **João Pedro Ferreira Pereira Königs.** *\<Thesis title — fill in
+> from title page\>.* Undergraduate thesis (TCC), \<University\>, 2026.
 
 The repository accompanies the thesis and is the canonical record of how
 the experimental measurements were produced. The thesis itself is the
@@ -29,9 +28,11 @@ properties that distinguish the models in the suite.
 The models span three attention patterns (causal, bidirectional,
 mixed local+global) and three positional encoding schemes (absolute,
 relative, rotary), with randomly initialised controls in both the
-bidirectional and causal families. The design isolates which properties
-of a model's architecture --- as opposed to its training --- account for
-the geometric organisation of its representations.
+bidirectional and causal families. The design isolates the contributions
+of attention pattern and positional encoding; pretraining objective is
+recorded as descriptive metadata in the model table but is not isolated
+as a controlled axis. Random-weight baselines distinguish the
+contribution of training from that of architecture alone.
 
 | # | Model | Notebook | Prefix | Attention | PE | Notes |
 |---|-------|----------|--------|-----------|------|-------|
@@ -99,7 +100,9 @@ notebooks; the methodology has one implementation.
 
 This summary covers what the code does in operational terms. The full
 methodology, with motivations, mathematical definitions, and
-architectural rationale, is in Chapter 4 of the thesis.
+architectural rationale, is in Chapter 5 (Geometric Analysis Framework)
+of the thesis. Chapter 4 of the thesis describes the dataset and the
+per-turn data unit that the methodology consumes.
 
 The procedure proceeds in five steps. For each turn in a sample of
 2,000 Codenames Duet clue-giving turns drawn from CULTURAL CODES
@@ -170,7 +173,8 @@ acceleration. The package is not designed for local execution.
 
 The experiment depends on the CULTURAL CODES dataset \[Shaikh et al.,
 2023\], which is not redistributed in this repository. The dataset is
-available at \<dataset URL\>. The expected path in Drive is
+available at <https://github.com/SALT-NLP/codenames> under a CC BY-SA
+4.0 licence. The expected path in Drive is
 `/content/drive/MyDrive/TCC/clue_generation.csv`, configurable per
 notebook.
 
@@ -256,20 +260,19 @@ one 7B model is in GPU memory at a time.
 
 | Thesis chapter / section | Implemented in |
 |---|---|
-| Ch. 3: The Codenames Duet Task | `data.py` (dataset loading, candidate construction) |
-| Ch. 4.3: Turn Sampling and Prompt Construction | `data.py`, `prompts.py` |
-| Ch. 4.4: Hidden State Extraction and Pooling | `extraction.py`, `spans.py` |
-| Ch. 4.5: Geometric Metrics (margin, adjusted margin) | `extraction.py`, `sanity.py` (SC5) |
-| Ch. 4.6.1: Rank-based Behavioural Metrics | `extraction.py`, `sanity.py` (SC4) |
-| Ch. 4.6.2: Positional Confound Diagnostics | `extraction.py`, `sanity.py` (SC6, SC7) |
-| Ch. 4.6.3: Between-Condition Diagnostics | `loop.py` (with_social condition handling) |
-| Ch. 4.7: Generation–Geometry Concordance | `generation.py`, `sanity.py` (SC4 concordance block) |
-| Ch. 4.8: Implementation and Reproducibility | `contract.py`, all of the above |
+| Ch. 4: The Codenames Duet Task (data, per-turn unit, attributes) | `data.py` (dataset loading, candidate construction) |
+| Ch. 5.3: Turn Sampling and Prompt Construction | `data.py`, `prompts.py` |
+| Ch. 5.4: Hidden State Extraction and Pooling | `extraction.py`, `spans.py` |
+| Ch. 5.5: Geometric Metrics (margin, adjusted margin) | `extraction.py`, `sanity.py` (SC5) |
+| Ch. 5.6.1: Rank-based Behavioural Metrics | `extraction.py`, `sanity.py` (SC4) |
+| Ch. 5.6.2: Positional Confound Diagnostics | `extraction.py`, `sanity.py` (SC6, SC7) |
+| Ch. 5.6.3: Between-Condition Diagnostics | `loop.py` (with_social condition handling) |
+| Ch. 5.7: Generation–Geometry Concordance | `generation.py`, `sanity.py` (SC4 concordance block) |
+| Ch. 5.8: Implementation and Reproducibility | `contract.py`, all of the above |
 
-The model loaders in `codenames/models/` are not
-described in any individual thesis section; they are the operational
-realisations of the model suite described in Chapter 4.2 (The Model
-Suite).
+The model loaders in `codenames/models/` are not described in any
+individual thesis section; they are the operational realisations of the
+model suite described in Chapter 5.2 (The Model Suite).
 
 ---
 

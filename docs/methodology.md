@@ -1,8 +1,10 @@
 # Methodology (brief)
 
-This is a one-page operational summary of the experimental methodology. The
-full version, with motivations, mathematical definitions, and architectural
-rationale, is in Chapter 4 of the thesis.
+This is a one-page operational summary of the experimental methodology.
+The full version, with motivations, mathematical definitions, and
+architectural rationale, is in Chapter 5 (Geometric Analysis Framework)
+of the thesis. Chapter 4 of the thesis describes the dataset and the
+per-turn data unit that this methodology consumes.
 
 ---
 
@@ -76,6 +78,6 @@ omit the generation phase but produce metrics under both conditions.
 | SC1–SC7 sanity outputs | `sanity.py` | `sc1_prompt_structure` … `sc7_shuffle_decomposition` |
 | Output filenames, NPZ matrix | `persistence.py` | `save_*` helpers |
 
-The thesis's Methodology chapter (§4.3–§4.8) is the source of record for
-why these choices were made. This package is the operational realisation of
-that methodology, nothing more.
+The thesis's Methodology chapter (Chapter 5, §5.3–§5.8) is the source
+of record for why these choices were made. This package is the
+operational realisation of that methodology, nothing more.

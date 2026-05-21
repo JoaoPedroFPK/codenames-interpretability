@@ -6,8 +6,9 @@ in `codenames/contract.py` as a frozen dataclass
 the contract during a run; if a parameter needs to change, increment the
 version (`v1.1`, `v2`, etc.) and document the change here.
 
-The full rationale for each value is in Chapter 4 (Methodology) of the
-thesis. This file is a quick reference; the thesis is the source of record.
+The full rationale for each value is in Chapter 5 (Geometric Analysis
+Framework) of the thesis. This file is a quick reference; the thesis is
+the source of record.
 
 ---
 
