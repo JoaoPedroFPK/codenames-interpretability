@@ -4,8 +4,10 @@ Layer-wise word representation geometry across seven transformer
 architectures, evaluated on the Codenames Duet clue-guessing task. This
 repository contains the source code for the experiments reported in:
 
-> **João Pedro Ferreira Pereira Königs.** *\<Thesis title — fill in
-> from title page\>.* Undergraduate thesis (TCC), \<University\>, 2026.
+> **João Pedro Ferreira Pereira Königs.** *Cross-Architectural Analysis of
+Layer-wise Representations in
+Transformer Language Models on a
+Word Association Task.* Undergraduate thesis (TCC), UFRGS, 2026.
 
 The repository accompanies the thesis and is the canonical record of how
 the experimental measurements were produced. The thesis itself is the
