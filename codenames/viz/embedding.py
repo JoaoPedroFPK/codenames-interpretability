@@ -16,9 +16,12 @@ import numpy as np
 
 from . import metrics as _m
 from .style import (
+    FS,
+    add_word_type_legend,
     apply_publication_style,
     depth_label,
-    legend_handles,
+    footnote,
+    grid_size,
     style_for,
 )
 
@@ -178,7 +181,7 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
         label = f"{words[i]} [T]" if wt == "target" else words[i]
         weight = "bold" if wt in ("hint", "target") else "normal"
         texts.append(ax.text(
-            emb[i, 0], emb[i, 1], label, fontsize=5.5, color="#222222",
+            emb[i, 0], emb[i, 1], label, fontsize=FS["word_label"], color="#222222",
             fontweight=weight, zorder=11,
         ))
     if adjust_text is not None and texts:
@@ -190,16 +193,16 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
         )
 
     ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
-                 fontsize=9, fontweight="bold")
-    ax.set_xlabel(f"{method_name} 1", fontsize=6)
-    ax.set_ylabel(f"{method_name} 2", fontsize=6)
+                 fontsize=FS["panel_title"], fontweight="bold")
+    ax.set_xlabel(f"{method_name} 1", fontsize=FS["axis_label"])
+    ax.set_ylabel(f"{method_name} 2", fontsize=FS["axis_label"])
     ax.set_xticks([]); ax.set_yticks([])
     ax.margins(0.16)
     ax.text(
         0.02, 0.02,
         f"{method_name}  T={scores['trustworthiness']:.2f}"
         f"  C={scores['continuity']:.2f}  rho={scores['shepard']:.2f}",
-        transform=ax.transAxes, fontsize=5.5, va="bottom", ha="left",
+        transform=ax.transAxes, fontsize=FS["annot"], va="bottom", ha="left",
         color="#555555",
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
     )
@@ -233,7 +236,10 @@ def plot_layer_panels(
     n_cols = min(n_cols, max(1, n))
     n_rows = int(np.ceil(n / n_cols))
     fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(4.0 * n_cols, 3.9 * n_rows), squeeze=False,
+        n_rows, n_cols,
+        figsize=grid_size(n_cols, n_rows, panel_aspect=1.0,
+                          header_in=0.5, footer_in=1.3),
+        squeeze=False,
     )
 
     records: List[Dict] = []
@@ -250,9 +256,9 @@ def plot_layer_panels(
 
         if vectors.shape[0] < 3:
             ax.text(0.5, 0.5, "too few words", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=7, color="grey")
+                    transform=ax.transAxes, fontsize=FS["annot"], color="grey")
             ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
-                         fontsize=9, fontweight="bold")
+                         fontsize=FS["panel_title"], fontweight="bold")
             ax.set_xticks([]); ax.set_yticks([])
             continue
 
@@ -262,7 +268,7 @@ def plot_layer_panels(
             max(results, key=lambda m: results[m]["combined"]) if results else None)
         if chosen is None:
             ax.text(0.5, 0.5, "reduction failed", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=7, color="grey")
+                    transform=ax.transAxes, fontsize=FS["annot"], color="grey")
             ax.set_xticks([]); ax.set_yticks([])
             continue
 
@@ -280,22 +286,17 @@ def plot_layer_panels(
         r, c = divmod(panel_i, n_cols)
         axes[r][c].axis("off")
 
-    # Shared legend (word-type taxonomy).
-    handles = legend_handles(sorted(all_types_present))
-    if handles:
-        fig.legend(
-            handles=handles, loc="lower center", ncol=len(handles),
-            bbox_to_anchor=(0.5, 0.005), title="Word type",
-            title_fontsize=8, fontsize=7,
-        )
-    fig.suptitle(title, y=0.995, fontsize=12, fontweight="bold")
-    fig.text(
-        0.5, 0.045,
+    # Shared house legend (word-type taxonomy) + light footnote, with the
+    # footnote clearly above the legend so they never collide.
+    add_word_type_legend(fig, sorted(all_types_present), y=0.02)
+    fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
+    footnote(
+        fig,
         f"Projection: {method.upper()} (cosine), fixed across panels. "
         "Per-panel T = trustworthiness, C = continuity, rho = Shepard "
         "correlation (all reducers audited in dr_quality_*.csv). Hint = diamond; "
         "targets tagged [T]; arrow = hint to nearest word in cosine space.",
-        ha="center", va="bottom", fontsize=6, color="#666666",
+        y=0.10,
     )
-    fig.tight_layout(rect=(0, 0.075, 1, 0.975))
+    fig.tight_layout(rect=(0, 0.16, 1, 0.96))
     return fig, records

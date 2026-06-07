@@ -13,7 +13,14 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .style import apply_publication_style, style_for
+from .style import (
+    FS,
+    add_word_type_legend,
+    apply_publication_style,
+    footnote,
+    grid_size,
+    style_for,
+)
 
 # Canonical block ordering so related word types cluster on the axes.
 _TYPE_ORDER = {"hint": 0, "target": 1, "black": 2, "tan": 3, "giver_feature": 4}
@@ -82,8 +89,10 @@ def plot_heatmap_pair(
     vmax = _symmetric_limit(matrices)
     vmin = -vmax
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6.2))
-    cbar_ax = fig.add_axes([0.92, 0.18, 0.015, 0.64])
+    fig, axes = plt.subplots(
+        1, 2, figsize=grid_size(2, 1, panel_aspect=1.0, footer_in=1.2),
+    )
+    cbar_ax = fig.add_axes([0.92, 0.30, 0.015, 0.52])
 
     for ax_i, mode in enumerate(modes):
         ax = axes[ax_i]
@@ -91,7 +100,7 @@ def plot_heatmap_pair(
         nice = "No social" if mode == "no_social" else "With social"
         if prep is None:
             ax.text(0.5, 0.5, f"{nice}: no data", ha="center", va="center",
-                    transform=ax.transAxes, color="grey", fontsize=9)
+                    transform=ax.transAxes, color="grey", fontsize=FS["panel_title"])
             ax.axis("off")
             continue
 
@@ -106,50 +115,35 @@ def plot_heatmap_pair(
         sns.heatmap(
             mat, mask=mask, ax=ax, cmap="RdBu_r", center=0.0,
             vmin=vmin, vmax=vmax, square=True,
-            annot=annot, fmt=".2f", annot_kws={"size": 4.5},
+            annot=annot, fmt=".2f", annot_kws={"size": FS["annot"]},
             linewidths=0.4, linecolor="white",
             xticklabels=words, yticklabels=words,
             cbar=(ax_i == 0), cbar_ax=(cbar_ax if ax_i == 0 else None),
             cbar_kws={"label": "Cosine similarity"},
         )
-        ax.set_title(f"{nice}  (n={n} words)")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=5.5)
-        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=5.5)
+        ax.set_title(f"{nice}  (n={n} words)", fontsize=FS["panel_title"])
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=FS["tick_label"])
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=FS["tick_label"])
         # Colour the tick labels by word type.
         for lbl, wt in zip(ax.get_xticklabels(), types):
             lbl.set_color(style_for(wt)["color"])
         for lbl, wt in zip(ax.get_yticklabels(), types):
             lbl.set_color(style_for(wt)["color"])
 
-    fig.suptitle(title, y=0.99, fontsize=13, fontweight="bold")
+    fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
 
-    # Word-type legend (colours match the axis-label colours), shown once.
+    # Single house legend (word-type taxonomy; colours match the axis labels).
     types_present = set()
     for mode in modes:
         if prepared[mode]:
             types_present.update(prepared[mode]["word_types"])
-    handles = _legend_handles(types_present)
-    if handles:
-        fig.legend(
-            handles=handles, loc="lower center", ncol=len(handles),
-            bbox_to_anchor=(0.5, 0.005), title="Word type (axis-label colour)",
-            title_fontsize=8, fontsize=7,
-        )
-    fig.text(
-        0.5, 0.065,
+    add_word_type_legend(fig, types_present, y=0.02)
+    footnote(
+        fig,
         "Lower triangle only (matrix is symmetric; the unit diagonal is omitted). "
         "Colorblind-safe diverging map centred at cosine = 0.",
-        ha="center", va="bottom", fontsize=6.5, color="#666666",
+        y=0.11,
     )
-    fig.subplots_adjust(left=0.06, right=0.9, top=0.9, bottom=0.16, wspace=0.25)
+    fig.subplots_adjust(left=0.06, right=0.9, top=0.9, bottom=0.24, wspace=0.25)
     info = {"layer": layer, "vmax": vmax}
     return fig, info
-
-
-def _legend_handles(types_present):
-    """Proxy legend handles (coloured squares) for word types in canonical order."""
-    from matplotlib.patches import Patch
-    present = [t for t in _TYPE_ORDER if t in set(types_present)]
-    present.sort(key=lambda t: _TYPE_ORDER[t])
-    return [Patch(facecolor=style_for(t)["color"], edgecolor="none",
-                  label=style_for(t)["label"]) for t in present]
