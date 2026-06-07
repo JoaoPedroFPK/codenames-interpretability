@@ -30,7 +30,7 @@ A self-contained `codenames/viz/` package plus a `visualize` CLI subcommand.
 |---|---|
 | `codenames/viz/loader.py` | Discover model dirs, auto-detect file prefix, join the index CSV with the `_f16.npz` matrix by `record_idx`, filter valid vectors + pooling, upcast to f32, sample boards (seed 42), parse `giver_features`. |
 | `codenames/viz/metrics.py` | Cosine-aware DR-quality metrics: trustworthiness (sklearn, `metric="cosine"`), continuity (custom dual), Shepard Spearman correlation (HD cosine vs 2D Euclidean). |
-| `codenames/viz/embedding.py` | Run UMAP/t-SNE/PCA (all cosine-aware), score + select the best per board×layer, draw the multi-panel projection. |
+| `codenames/viz/embedding.py` | Run UMAP/t-SNE/PCA (all cosine-aware), score each per board×layer, render the multi-panel projection with the fixed reducer (UMAP). |
 | `codenames/viz/heatmap.py` | Symmetric cosine matrix, lower-triangle masking, the `no_social`/`with_social` paired heatmap. |
 | `codenames/viz/style.py` | Publication style (Okabe-Ito palette, sans-serif, despined, PDF+PNG @300 DPI), the canonical word-type → colour/marker map, layer-depth labels, representative-layer selection. |
 | `codenames/viz/pipeline.py` | Orchestration: per model, per sampled board, emit both figure families + the DR-quality CSV. |
@@ -65,12 +65,12 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
 - The social panel contains **all giver-feature words the board specifies**
   (2–9; see §5).
 
-### Projection (`tsne_{condition}_layers.{pdf,png}`)
+### Projection (`umap_{condition}_layers.{pdf,png}`)
 - Multi-panel, one panel per representative layer (≈6 spread across depth,
   endpoints always included).
 - Coloured by **true word type**; **hint = diamond**, **targets tagged `[T]`**,
   grey connector from hint to its nearest word in cosine space.
-- Rendered with the fixed, most-trustworthy reducer (**t-SNE, cosine**; see §4);
+- Rendered with the fixed reducer **UMAP (cosine)** (see §4.6 for the choice);
   each panel prints its **T / C / Shepard scores**, and the full UMAP/t-SNE/PCA
   comparison is written to `dr_quality_{condition}.csv` (column `selected` marks
   the rendered method).
@@ -212,25 +212,24 @@ then aggregate the `dr_quality_*.csv` files.
 
 ### 4.6 Decision and its justification
 
-**The figures render a single reducer — t-SNE with `metric="cosine"`.** Rationale:
+**The figures render a single reducer — UMAP with `metric="cosine"`.** A fixed
+method (rather than the per-panel best) is used for **comparability across
+panels**: letting the reducer vary mixes incomparable layouts (PCA axes are
+linear; t-SNE/UMAP are not), which misleads when scanning a board across layers.
+UMAP is the chosen fixed method for this work, giving one consistent visual
+grammar and aligning with the projection technique used elsewhere in the thesis.
 
-1. **Highest local fidelity.** t-SNE has the best mean trustworthiness (0.849)
-   and continuity (0.848), and is the per-case best in 34/60 cases — more than
-   UMAP and PCA combined. The projection's purpose is *local* proximity reading
-   (which words sit near the hint/target), exactly what trustworthiness and
-   continuity measure.
-2. **Comparability across panels.** Letting the reducer vary per panel mixes
-   incomparable layouts (PCA axes are linear; t-SNE/UMAP are not), which is
-   misleading when scanning a board across layers. A fixed method gives one
-   visual grammar.
-3. **PCA's edge is only global.** PCA wins marginally on Shepard ρ (0.658 vs
-   0.632) — global monotone distance — but that is the metric *least* relevant to
-   reading local neighbourhoods, and PCA is visibly worse locally.
-4. **UMAP is out of regime.** With ≈17–26 points per board, UMAP is far below the
-   density it needs; it has the weakest Shepard (0.541) and is rarely best.
-
-The audit CSV is retained so any panel's reliability can still be checked, and
-each rendered panel prints its own `T / C / ρ`.
+**Honest caveat (kept for the thesis):** on the comparison above, UMAP is *not*
+the top scorer on these small per-board sets — t-SNE has the best mean
+trustworthiness (0.849) and continuity (0.848) and is the per-case best in 34/60
+cases, while UMAP has the weakest Shepard (0.541) and is rarely the single best.
+With ≈17–26 points per board UMAP operates below its comfortable density regime.
+The rendering choice therefore trades a small amount of measured local fidelity
+for consistency with the wider thesis. Because all three reducers are still
+scored, each rendered UMAP panel **prints its own `T / C / ρ`** and the full
+audit lives in `dr_quality_{condition}.csv` — so any panel's reliability can be
+checked, and switching back is a one-line change (`PREFERRED_METHOD` in
+`codenames/viz/embedding.py`).
 
 ### 4.7 How to read the numbers (caveats for the thesis)
 
@@ -263,7 +262,7 @@ A useful validation case surfaced during review. Board **2521** is a single-targ
 turn whose human clue is `hint = "cream"`, `target = "mammoth"` — a semantically
 odd association. The figures let us interrogate it directly:
 
-- In the projection (`tsne_no_social_layers`), the **arrow from the hint
+- In the projection (`umap_no_social_layers`), the **arrow from the hint
   (`cream`) to its nearest word in cosine space points to `drop` / `wake` /
   `slip`, never to `mammoth`**, at every layer. The model does not reconstruct
   the human association.
@@ -329,7 +328,26 @@ pip install -e ".[viz]"
 codenames-experiment visualize --model bert            # 5 boards, mean pooling
 codenames-experiment visualize --model bert --n-boards 8 --layers 0,6,12
 codenames-experiment visualize --all                   # every model under output/
+codenames-experiment visualize --all --boards 565,2521 # same fixed boards, every model
 ```
 
 Output: `visualization/{model}/board_{row_id}/` containing `heatmap_L*.{pdf,png}`,
-`tsne_{condition}_layers.{pdf,png}`, and `dr_quality_{condition}.csv`.
+`umap_{condition}_layers.{pdf,png}`, and `dr_quality_{condition}.csv`.
+
+## 9. Cross-model comparability (same boards across models)
+
+To compare models on the *same* board, the chosen boards must be identical
+across model runs. Board selection is deterministic in `(available id-set,
+seed)`, but the available id-set is only the same across models when they were
+extracted with the same contract **seed (42) and run size**; differing run sizes
+or extraction errors make the per-model subsamples diverge. Two mechanisms make
+the comparison explicit rather than incidental:
+
+- **`--boards 565,2521,...`** — pin exact board `row_id`s; the same set is used
+  for every model (any board not available for a given model is skipped with a
+  warning). Recommended for figures that appear side by side in the thesis.
+- **`--all` without `--boards`** — boards are sampled from the **intersection**
+  of boards available across *all* discovered models, so the selection is
+  guaranteed present everywhere and identical for every model. If the models have
+  no common boards (e.g. different run sizes), the pipeline warns loudly and
+  falls back to per-model sampling (not comparable).

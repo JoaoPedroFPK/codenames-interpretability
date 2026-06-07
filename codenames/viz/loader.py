@@ -123,14 +123,46 @@ def available_layers(index: pd.DataFrame) -> List[int]:
     return sorted(int(x) for x in index["layer"].unique())
 
 
+def sample_ids(ids, n: int, seed: int = 42) -> List[int]:
+    """Reproducibly sample ``n`` ids from an iterable of board ids.
+
+    Deterministic in (sorted id-set, seed): the same id-set and seed always
+    yield the same selection — this is what makes cross-model board selection
+    coincide when the models share the same available boards.
+    """
+    uniq = sorted(set(int(x) for x in ids))
+    if len(uniq) <= n:
+        return uniq
+    rng = np.random.default_rng(seed)
+    return sorted(int(x) for x in rng.choice(uniq, size=n, replace=False))
+
+
 def sample_boards(index: pd.DataFrame, n: int, seed: int = 42) -> List[int]:
     """Reproducibly sample ``n`` board (row_id) values from the subsample."""
-    ids = np.sort(index["row_id"].unique())
-    if len(ids) <= n:
-        return [int(x) for x in ids]
-    rng = np.random.default_rng(seed)
-    chosen = rng.choice(ids, size=n, replace=False)
-    return sorted(int(x) for x in chosen)
+    return sample_ids(index["row_id"].unique(), n, seed)
+
+
+def subsample_board_ids(
+    model_dir: str, prefix: str, pooling: str = "mean",
+) -> set:
+    """Board ids that have valid vectors in BOTH conditions (no NPZ load).
+
+    Reads only the lightweight index CSVs; used to compute the set of boards a
+    model can offer, and (across models) their intersection for fair comparison.
+    """
+    sets: List[set] = []
+    for mode in MODES:
+        idx_path = os.path.join(model_dir, f"{prefix}{_INDEX_SUFFIX}{mode}.csv")
+        if not os.path.exists(idx_path):
+            continue
+        df = pd.read_csv(idx_path, usecols=["row_id", "pooling_method", "vector_valid"])
+        sel = df[(df["pooling_method"] == pooling) & (df["vector_valid"])]
+        ids = set(int(x) for x in sel["row_id"].unique())
+        if ids:
+            sets.append(ids)
+    if not sets:
+        return set()
+    return set.intersection(*sets)
 
 
 def board_layer_words(

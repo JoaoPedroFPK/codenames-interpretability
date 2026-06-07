@@ -4,7 +4,7 @@ Produces, per model and per sampled board:
 
 - ``heatmap_L{layer}.{pdf,png}`` — cosine heatmap pair (no_social vs with_social)
   at each representative layer;
-- ``tsne_{condition}_layers.{pdf,png}`` — multi-panel cosine-aware projection
+- ``umap_{condition}_layers.{pdf,png}`` — multi-panel cosine-aware projection
   across representative layers, for each condition that has the board;
 - ``dr_quality_{condition}.csv`` — the UMAP/t-SNE/PCA comparison scores per layer.
 
@@ -57,8 +57,15 @@ def run(
     seed: int = 42,
     k: int = 5,
     formats: Sequence[str] = ("pdf", "png"),
+    boards: Optional[Sequence[int]] = None,
 ) -> Dict:
-    """Generate the figure set for one model. Returns a small summary dict."""
+    """Generate the figure set for one model. Returns a small summary dict.
+
+    If ``boards`` is given, those exact row_ids are used (any not available for
+    this model are skipped with a warning) — this is how the same boards are
+    visualised across models for direct comparison. Otherwise ``n_boards`` are
+    sampled reproducibly from this model's own subsample.
+    """
     import matplotlib.pyplot as plt
 
     rec = loader.resolve_model(output_root, model)
@@ -84,13 +91,26 @@ def run(
     sel_layers = sorted(set(int(x) for x in layers)) if layers else select_layers(avail, 6)
     sel_layers = [L for L in sel_layers if L in set(avail)]
 
-    # Sample boards common to all present conditions where possible.
+    # Boards available for this model (valid in all present conditions).
     id_sets = [set(c["index"]["row_id"].unique()) for c in present.values()]
     common = set.intersection(*id_sets) if id_sets else set()
     pool_index = ref_cond["index"]
     if common:
         pool_index = pool_index[pool_index["row_id"].isin(common)]
-    board_ids = loader.sample_boards(pool_index, n_boards, seed)
+
+    if boards is not None:
+        requested = [int(b) for b in boards]
+        avail = set(int(x) for x in pool_index["row_id"].unique())
+        board_ids = [b for b in requested if b in avail]
+        missing = [b for b in requested if b not in avail]
+        if missing:
+            print(f"[viz]   WARNING: {len(missing)} requested board(s) not available "
+                  f"for '{name}' (skipped): {missing}")
+        if not board_ids:
+            print(f"[viz]   no requested boards available for '{name}'; skipping.")
+            return {"model": name, "boards": [], "layers": sel_layers, "figures": 0}
+    else:
+        board_ids = loader.sample_boards(pool_index, n_boards, seed)
     print(f"[viz]   layers={sel_layers}  boards={board_ids}")
 
     n_fig = 0
@@ -123,7 +143,7 @@ def run(
                 continue
             nice = "no social" if mode == "no_social" else "with social"
             title = _board_title(name, row_id, meta, suffix=f"  ·  {nice}")
-            method = embedding.PREFERRED_METHOD  # rendered reducer (default t-SNE)
+            method = embedding.PREFERRED_METHOD  # rendered reducer (default UMAP)
             fig, records = embedding.plot_layer_panels(
                 layer_data, num_layers=nlayers, title=title, k=k, seed=seed,
                 method=method,
@@ -146,12 +166,48 @@ def run(
     return summary
 
 
-def run_all(output_root: str = "output", **kwargs) -> List[Dict]:
-    """Generate figures for every model discovered under ``output_root``."""
+def run_all(
+    output_root: str = "output",
+    *,
+    n_boards: int = 5,
+    pooling: str = "mean",
+    seed: int = 42,
+    boards: Optional[Sequence[int]] = None,
+    **kwargs,
+) -> List[Dict]:
+    """Generate figures for every model discovered under ``output_root``.
+
+    For direct cross-model comparison, the SAME boards are used for every model:
+    unless an explicit ``boards`` list is given, ``n_boards`` are sampled from the
+    **intersection** of the boards available across all discovered models (so the
+    chosen boards are guaranteed present everywhere and identical across models).
+    """
     models = loader.discover_models(output_root)
     if not models:
         raise SystemExit(f"No model outputs found under '{output_root}'.")
+
+    if boards is None:
+        per_model = {
+            rec["name"]: loader.subsample_board_ids(rec["dir"], rec["prefix"], pooling)
+            for rec in models
+        }
+        shared = set.intersection(*per_model.values()) if per_model else set()
+        print(f"[viz] models: {list(per_model)}")
+        print(f"[viz] shared boards across all models: {len(shared)}")
+        if shared:
+            boards = loader.sample_ids(shared, n_boards, seed)
+            print(f"[viz] using SHARED boards for all models: {boards}")
+        else:
+            sizes = {m: len(s) for m, s in per_model.items()}
+            print("[viz] WARNING: models have NO common subsample boards "
+                  f"(per-model counts: {sizes}). This usually means they were run "
+                  "with different run sizes/seeds. Falling back to per-model "
+                  "sampling — boards will NOT be comparable across models.")
+
     summaries = []
     for rec in models:
-        summaries.append(run(rec["name"], output_root=output_root, **kwargs))
+        summaries.append(run(
+            rec["name"], output_root=output_root,
+            n_boards=n_boards, pooling=pooling, seed=seed, boards=boards, **kwargs,
+        ))
     return summaries

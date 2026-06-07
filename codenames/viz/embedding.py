@@ -24,11 +24,11 @@ from .style import (
 
 METHODS = ("umap", "tsne", "pca")
 
-# The reducer used to render the projection. t-SNE(cosine) was the most
-# trustworthy on these small per-board word sets (see docs/visualization.md), so
-# we standardise on it for a consistent, comparable picture across boards/layers.
-# All three reducers are still scored per panel for the dr_quality_*.csv audit.
-PREFERRED_METHOD = "tsne"
+# The reducer used to render the projection. Standardised on UMAP(cosine) for a
+# consistent picture across boards/layers. All three reducers (UMAP, t-SNE, PCA)
+# are still fit and scored per panel for the dr_quality_*.csv audit, so the
+# trustworthiness of the rendered UMAP layout can always be checked.
+PREFERRED_METHOD = "umap"
 
 
 def _normalize(X: np.ndarray) -> np.ndarray:
@@ -191,7 +191,8 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
 
     ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
                  fontsize=9, fontweight="bold")
-    ax.set_xlabel("t-SNE 1", fontsize=6); ax.set_ylabel("t-SNE 2", fontsize=6)
+    ax.set_xlabel(f"{method_name} 1", fontsize=6)
+    ax.set_ylabel(f"{method_name} 2", fontsize=6)
     ax.set_xticks([]); ax.set_yticks([])
     ax.margins(0.16)
     ax.text(
@@ -218,8 +219,8 @@ def plot_layer_panels(
 
     ``layer_data`` is a list of dicts (one per layer) with keys ``layer``,
     ``words`` (list[str]), ``word_types`` (list[str]), ``vectors`` ([W, D]).
-    The panel is rendered with the fixed, most-trustworthy reducer (``method``,
-    default t-SNE); all reducers are still scored into ``records`` for the audit.
+    The panel is rendered with a fixed reducer (``method``, default UMAP); all
+    reducers are still scored into ``records`` for the audit.
 
     Returns ``(figure, records)`` where ``records`` is a flat list of per-layer
     metric rows for CSV export.
@@ -290,10 +291,10 @@ def plot_layer_panels(
     fig.suptitle(title, y=0.995, fontsize=12, fontweight="bold")
     fig.text(
         0.5, 0.045,
-        f"Projection: {method.upper()} (cosine), the most trustworthy reducer "
-        "for these sets. Per-panel T = trustworthiness, C = continuity, "
-        "rho = Shepard correlation. Hint = diamond; targets tagged [T]; "
-        "arrow = hint to nearest word in cosine space.",
+        f"Projection: {method.upper()} (cosine), fixed across panels. "
+        "Per-panel T = trustworthiness, C = continuity, rho = Shepard "
+        "correlation (all reducers audited in dr_quality_*.csv). Hint = diamond; "
+        "targets tagged [T]; arrow = hint to nearest word in cosine space.",
         ha="center", va="bottom", fontsize=6, color="#666666",
     )
     fig.tight_layout(rect=(0, 0.075, 1, 0.975))

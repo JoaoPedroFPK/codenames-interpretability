@@ -223,6 +223,11 @@ def _make_visualize_parser(sp: "argparse._SubParsersAction") -> argparse.Argumen
                    help="Random seed for board sampling and reducers (default: 42).")
     p.add_argument("--layers", default=None,
                    help="Comma-separated explicit layer indices; default picks ~6 by depth.")
+    p.add_argument("--boards", default=None,
+                   help="Comma-separated explicit board row_ids to visualize. Pins the "
+                        "SAME boards across models for direct comparison. Overrides "
+                        "--n-boards. With --all and no --boards, boards are sampled from "
+                        "the intersection available across all models.")
     return p
 
 
@@ -753,10 +758,14 @@ def _cmd_visualize(args: argparse.Namespace) -> int:
     layers = None
     if args.layers:
         layers = [int(x) for x in args.layers.split(",") if x.strip()]
+    boards = None
+    if args.boards:
+        boards = [int(x) for x in args.boards.split(",") if x.strip()]
 
     common = dict(
         output_root=args.output_dir, viz_dir=args.viz_dir,
         n_boards=args.n_boards, pooling=args.pooling, layers=layers, seed=args.seed,
+        boards=boards,
     )
     if args.all:
         viz_pipeline.run_all(**common)
