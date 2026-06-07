@@ -1,6 +1,6 @@
 """Random Qwen2.5-7B loader (architecture-only, random weights).
 
-Per CONTEXT.md §7.10 the canonical init pattern uses
+The canonical init pattern uses
 ``accelerate.init_empty_weights()`` + ``to_empty(device=...)`` +
 ``model.apply(model._init_weights)`` plus an explicit RMSNorm re-init loop
 (because Qwen2's ``_init_weights`` does not handle RMSNorm and the

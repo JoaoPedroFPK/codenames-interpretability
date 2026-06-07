@@ -6,8 +6,8 @@ notebooks; print formatting (table headers, column alignment, decimal
 precision, PASS/WARN markers) is byte-identical because the user reads these
 to verify a run.
 
-SC0 (Generation Diagnostic) is intentionally omitted per CONTEXT.md §7.8 —
-SC4 already covers generation accuracy and concordance.
+SC0 (Generation Diagnostic) is intentionally omitted — SC4 already covers
+generation accuracy and concordance.
 """
 
 import os

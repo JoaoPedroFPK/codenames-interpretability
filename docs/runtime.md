@@ -99,7 +99,7 @@ resulting `*_general_{mode}.csv` rows against the existing N=2000 outputs
 filtered to the same 50 row_ids. It reports `Validation PASSED` or lists
 the differing columns.
 
-CONTEXT.md Section 6 enumerates the most common drift sources (random-state
-consumption, hot-loop operation order, dictionary iteration order, fp16
-conversion timing, tokenizer init args). When validation fails, that is
-the place to look first.
+The most common drift sources are random-state consumption, hot-loop
+operation order, dictionary iteration order, fp16 conversion timing, and
+tokenizer init args. When validation fails, those are the places to look
+first.

@@ -80,8 +80,7 @@ loader's `use_truncation` metadata flag.
 
 ## Why a frozen contract
 
-The bit-identity requirement (CONTEXT.md Section 6) says that the
-refactored code must produce outputs interchangeable with the existing
-N=2000 runs. Any drift in these parameters — even silently — would break
+The bit-identity requirement says that the refactored code must produce
+outputs interchangeable with the existing N=2000 runs. Any drift in these parameters — even silently — would break
 that contract. The frozen dataclass ensures that a parameter change is
 visible at code-review time, not at output-diff time.

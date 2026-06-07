@@ -25,7 +25,7 @@ def test_contract_is_frozen():
 
 
 def test_contract_v1_default_values():
-    """CONTRACT_V1 matches the values codified in CONTEXT.md Section 7.1."""
+    """CONTRACT_V1 matches its frozen, canonical parameter values."""
     c = CONTRACT_V1
     assert c.sample_size == 2000
     assert c.candidate_order == "fixed"
