@@ -58,8 +58,12 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
   side**.
 - **Lower triangle only** (matrix is symmetric; the trivial unit diagonal is
   masked too) — no redundant grid.
-- Colorblind-safe **diverging `RdBu_r` centred at 0**, symmetric vmin/vmax shared
-  across the pair, so positive vs negative association reads directly.
+- **Sequential `Reds`** (cream → dark red; darker = higher cosine), shared
+  `0..vmax` scale across the pair so the two panels are directly comparable. This
+  matches the thesis example figures. Per-cell cosine values are printed with
+  contrast-aware text (white on the darkest cells); the figure is sized to the
+  word count so the numbers stay legible. The empty first row / last column that
+  a strict lower triangle produces are trimmed.
 - **Identical word ordering across both panels** (type blocks hint → target →
   assassin → neutral, alphabetical within), so the shared board cells can be
   diffed cell-by-cell. Axis labels coloured by type.
@@ -95,10 +99,11 @@ so its axis-label colour does not collapse against Neutral amber in grayscale
 - **Heatmap** (`viz/heatmap.py`): one shared word ordering across both panels
   (type blocks then alphabetical; giver features appended last in the social
   panel) so cells diff directly; matrix = clipped `X̂ X̂ᵀ` on L2-normalised rows; upper triangle
-  **and** diagonal masked (`np.triu(..., k=0)`); `cmap="RdBu_r"`, `center=0`, and
-  **symmetric limits** `vmin=−v, vmax=+v` where `v = max(|off-diagonal|)` across
-  both panels (≥0.1) so the pair is directly comparable; cells annotated when
-  `n ≤ 28`; one shared colorbar; axis labels coloured by word type plus a patch
+  **and** diagonal masked, then the empty first row / last column trimmed;
+  `cmap="Reds"`, `vmin=0`, `vmax` = max off-diagonal cosine shared across both
+  panels; per-cell values printed with contrast-aware text (white on the darkest
+  cells); the figure is sized to the word count so numbers stay legible; one
+  shared colorbar; axis labels coloured by word type plus the shared word-type
   legend.
 - **Projection** (`viz/embedding.py`): markers carry a thin **white edge**
   (hint: black edge, larger) to separate overlapping points; the hint→nearest

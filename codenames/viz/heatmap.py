@@ -1,10 +1,11 @@
 """Word x word cosine-similarity heatmap at a fixed board and layer.
 
-The similarity matrix is symmetric, so only the lower triangle is shown (the
-diagonal — trivially 1 — is masked too). The ``no_social`` and ``with_social``
-conditions are drawn side by side; the social panel additionally contains the
-giver's demographic feature words. A colorblind-safe diverging colormap centred
-at cosine = 0 makes positive vs negative association directly readable.
+The similarity matrix is symmetric, so only the lower triangle is shown; the
+self-similarity diagonal and the resulting empty first row / last column are
+trimmed. The ``no_social`` and ``with_social`` conditions are drawn side by side
+with identical word ordering (the social panel appends the giver's demographic
+feature words). A sequential Reds colormap (darker = higher cosine) and per-cell
+values match the thesis example figures.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from .style import (
     add_word_type_legend,
     apply_publication_style,
     footnote,
-    grid_size,
     style_for,
 )
 
@@ -42,15 +42,15 @@ def cosine_matrix(vectors: np.ndarray) -> np.ndarray:
     return np.clip(Xn @ Xn.T, -1.0, 1.0)
 
 
-def _symmetric_limit(matrices: Sequence[np.ndarray]) -> float:
-    """Largest absolute off-diagonal value across panels (>=0.1), for vmin/vmax."""
+def _max_offdiag(matrices: Sequence[np.ndarray]) -> float:
+    """Largest off-diagonal cosine across panels (>=0.1), for the Reds vmax."""
     vmax = 0.0
     for m in matrices:
         if m.size == 0:
             continue
         off = m.copy()
-        np.fill_diagonal(off, 0.0)
-        vmax = max(vmax, float(np.abs(off).max()))
+        np.fill_diagonal(off, -np.inf)
+        vmax = max(vmax, float(np.nanmax(off)))
     return max(vmax, 0.1)
 
 
@@ -59,7 +59,7 @@ def plot_heatmap_pair(
     *,
     layer: int,
     title: str,
-    annotate_max_words: int = 28,
+    annotate_max_words: int = 40,
 ) -> Tuple["object", Dict]:
     """Draw the ``no_social`` / ``with_social`` heatmap pair for one layer.
 
@@ -106,12 +106,18 @@ def plot_heatmap_pair(
         prepared[mode] = {"words": words, "word_types": types, "matrix": mat}
         matrices.append(mat)
 
-    vmax = _symmetric_limit(matrices)
-    vmin = -vmax
+    # Sequential Reds: cream (low) -> dark red (high), shared 0..vmax scale so the
+    # two panels are directly comparable.
+    vmax = _max_offdiag(matrices)
+    vmin = 0.0
 
-    fig, axes = plt.subplots(
-        1, 2, figsize=grid_size(2, 1, panel_aspect=1.0, footer_in=1.2),
-    )
+    # Size the figure to the word count so cells (and their numbers) stay legible
+    # (a dense ~20x20 matrix is naturally a wide figure, not a text-width one).
+    n_max = max((len(prepared[m]["words"]) for m in modes if prepared[m]), default=10)
+    panel_w = max(3.0, n_max * 0.32)        # inches per square panel
+    fig_w = 2 * panel_w + 2.4               # + axis labels, gap, colorbar
+    fig_h = panel_w + 1.7                    # + suptitle, legend, footnote
+    fig, axes = plt.subplots(1, 2, figsize=(fig_w, fig_h))
     cbar_ax = fig.add_axes([0.92, 0.30, 0.015, 0.52])
 
     for ax_i, mode in enumerate(modes):
@@ -128,26 +134,40 @@ def plot_heatmap_pair(
         words = prep["words"]
         types = prep["word_types"]
         n = len(words)
-        # Mask upper triangle incl. diagonal -> strictly lower triangle shown.
-        mask = np.triu(np.ones_like(mat, dtype=bool), k=0)
-        annot = n <= annotate_max_words
+
+        # Strictly-lower-triangle layout. The first word has no cells on its row
+        # and the last word has none in its column, so they would dangle with an
+        # empty axis tick. Trim them: show rows = words[1:], cols = words[:-1].
+        sub = mat[1:, :n - 1]
+        sub_mask = np.triu(np.ones_like(sub, dtype=bool), k=1)
+        y_words, y_types = words[1:], types[1:]
+        x_words, x_types = words[:-1], types[:-1]
+        annot = (n - 1) <= annotate_max_words
 
         sns.heatmap(
-            mat, mask=mask, ax=ax, cmap="RdBu_r", center=0.0,
+            sub, mask=sub_mask, ax=ax, cmap="Reds",
             vmin=vmin, vmax=vmax, square=True,
             annot=annot, fmt=".2f", annot_kws={"size": FS["annot"]},
-            linewidths=0.4, linecolor="white",
-            xticklabels=words, yticklabels=words,
+            linewidths=0.5, linecolor="white",
+            xticklabels=x_words, yticklabels=y_words,
             cbar=(ax_i == 0), cbar_ax=(cbar_ax if ax_i == 0 else None),
             cbar_kws={"label": "Cosine similarity"},
         )
+        # Contrast-aware annotation colour: white text on the darkest cells.
+        if annot:
+            for t in ax.texts:
+                try:
+                    val = float(t.get_text())
+                except ValueError:
+                    continue
+                t.set_color("white" if val >= 0.62 * vmax else "#333333")
         ax.set_title(f"{nice}  (n={n} words)", fontsize=FS["panel_title"])
         ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=FS["tick_label"])
         ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=FS["tick_label"])
-        # Colour the tick labels by word type.
-        for lbl, wt in zip(ax.get_xticklabels(), types):
+        # Colour the tick labels by word type (y uses words[1:], x uses words[:-1]).
+        for lbl, wt in zip(ax.get_xticklabels(), x_types):
             lbl.set_color(style_for(wt)["color"])
-        for lbl, wt in zip(ax.get_yticklabels(), types):
+        for lbl, wt in zip(ax.get_yticklabels(), y_types):
             lbl.set_color(style_for(wt)["color"])
 
     fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
@@ -160,10 +180,11 @@ def plot_heatmap_pair(
     add_word_type_legend(fig, types_present, y=0.02)
     footnote(
         fig,
-        "Lower triangle only (matrix is symmetric; the unit diagonal is omitted). "
-        "Colorblind-safe diverging map centred at cosine = 0. Both panels share an "
-        "identical word ordering, so shared cells can be diffed directly; the "
-        "giver-feature rows/cols append only in the with-social panel.",
+        "Lower triangle only (matrix is symmetric; the self-similarity diagonal "
+        "and the empty first row / last column are trimmed). Sequential Reds: "
+        "darker = higher cosine. Both panels share an identical word ordering, so "
+        "shared cells diff directly; giver-feature rows/cols append only in the "
+        "with-social panel.",
         y=0.11,
     )
     fig.subplots_adjust(left=0.06, right=0.9, top=0.9, bottom=0.24, wspace=0.25)
