@@ -174,18 +174,23 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
             color="#4f8a9c", lw=0.8, alpha=0.75, zorder=2, solid_capstyle="round",
         )
 
-    # Labels: subtle. Hint and target labels take their type colour and bold; the
-    # rest recede in light grey. Repelled off the points with thin leader lines.
+    # Labels: only the semantically important words (hint, target, assassin,
+    # giver feature) are labelled; neutral "residual" words stay as unlabelled
+    # dots — this matches the example and keeps dense boards legible. Repelled
+    # off the points with thin leader lines.
+    _LABEL_STYLE = {
+        "hint":          (style_for("hint")["color"], "bold"),
+        "target":        (style_for("target")["color"], "normal"),
+        "giver_feature": (style_for("giver_feature")["color"], "normal"),
+        "black":         ("#666666", "normal"),
+    }
     texts = []
     for i, wt in enumerate(word_types):
+        if wt not in _LABEL_STYLE:
+            continue
         base = lmap.get(words[i], words[i])
         label = f"{base} [T]" if wt == "target" else base
-        if wt == "hint":
-            col, weight = style_for("hint")["color"], "bold"
-        elif wt == "target":
-            col, weight = style_for("target")["color"], "normal"
-        else:
-            col, weight = "#9a9a9a", "normal"
+        col, weight = _LABEL_STYLE[wt]
         texts.append(ax.text(
             emb[i, 0], emb[i, 1], label, fontsize=FS["word_label"], color=col,
             fontweight=weight, zorder=11,
@@ -236,8 +241,8 @@ def plot_layer_panels(
     n_rows = int(np.ceil(n / n_cols))
     fig, axes = plt.subplots(
         n_rows, n_cols,
-        figsize=grid_size(n_cols, n_rows, panel_aspect=1.0,
-                          header_in=0.25, footer_in=0.3),
+        figsize=grid_size(n_cols, n_rows, panel_aspect=1.0, width_in=8.6,
+                          header_in=0.3, footer_in=0.35),
         squeeze=False,
     )
 

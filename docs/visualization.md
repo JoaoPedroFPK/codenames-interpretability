@@ -116,14 +116,16 @@ each `giver.<attr>` word to its value from the board's `giver_features` dict
   cells); the figure is sized to the word count so numbers stay legible; one
   shared colorbar; axis labels coloured by word type plus the shared word-type
   legend.
-- **Projection** (`viz/embedding.py`): markers carry a thin **white edge**
-  (hint: black edge, modestly larger) to separate overlapping points; the
-  hint→nearest connector is a thin teal **line** (`#4f8a9c`, no arrowhead) drawn
-  *under* the markers; word labels are repelled with **`adjustText`**
-  (`expand=(1.15, 1.3)`, leader lines in light grey), hint/target labels in their
-  type colour and bold, the rest in light grey; ≈6 layers per figure in a
-  3-column grid; a compact framed legend in the **top-right corner**; **no
-  per-panel metric box and no footnote** (caption goes in LaTeX, §3.4).
+- **Projection** (`viz/embedding.py`): small per-type markers with a thin
+  **white edge** (hint: dark edge) to separate overlaps; the hint→nearest
+  connector is a thin teal **line** (`#4f8a9c`, no arrowhead) drawn *under* the
+  markers. **Only the semantically important words are labelled** — hint, target
+  (`[T]`), assassin, giver feature — while neutral "residual" words stay as
+  unlabelled dots, which keeps dense (9-giver) boards legible and matches the
+  example's emphasis. Labels are repelled with **`adjustText`** (leader lines in
+  light grey). ≈6 layers in a 3-column grid at ~8.6 in wide (so labels breathe);
+  a compact framed legend in the **top-right corner**; **no per-panel metric box
+  and no figure title/footnote** (board identity + caption go in LaTeX, §3.4).
 - **Determinism:** board sampling, t-SNE, and UMAP all take the same `--seed`
   (default 42); reruns are identical.
 
