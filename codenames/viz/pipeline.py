@@ -24,6 +24,11 @@ from . import embedding, heatmap, loader
 from .style import save_figure, select_layers
 
 
+# Title separator: a mid-dot framed by thin spaces (U+2009) so the dots get a
+# little air and do not render cramped against the surrounding words.
+_SEP = "  ·  "
+
+
 def _board_title(model: str, row_id: int, meta: Dict, suffix: str = "") -> str:
     hint = meta.get("hint")
     nt = meta.get("n_targets")
@@ -32,7 +37,7 @@ def _board_title(model: str, row_id: int, meta: Dict, suffix: str = "") -> str:
         bits.append(f"hint = '{hint}'")
     if nt is not None and not pd.isna(nt):
         bits.append(f"{int(nt)} target(s)")
-    head = "  ·  ".join(bits)
+    head = _SEP.join(bits)
     return f"{head}{suffix}"
 
 
@@ -128,7 +133,7 @@ def run(
                 continue
             meta = loader.board_meta(generals.get("with_social", pd.DataFrame()), row_id) \
                 or loader.board_meta(generals.get("no_social", pd.DataFrame()), row_id)
-            title = _board_title(name, row_id, meta, suffix=f"  ·  layer {layer}")
+            title = _board_title(name, row_id, meta, suffix=f"{_SEP}layer {layer}")
             fig, _info = heatmap.plot_heatmap_pair(panels, layer=layer, title=title)
             paths = save_figure(fig, os.path.join(board_dir, f"heatmap_L{layer:02d}"),
                                 formats=tuple(formats))
@@ -142,7 +147,7 @@ def run(
             if not any(ld["vectors"].shape[0] >= 3 for ld in layer_data):
                 continue
             nice = "no social" if mode == "no_social" else "with social"
-            title = _board_title(name, row_id, meta, suffix=f"  ·  {nice}")
+            title = _board_title(name, row_id, meta, suffix=f"{_SEP}{nice}")
             method = embedding.PREFERRED_METHOD  # rendered reducer (default UMAP)
             fig, records = embedding.plot_layer_panels(
                 layer_data, num_layers=nlayers, title=title, k=k, seed=seed,

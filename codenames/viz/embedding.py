@@ -157,7 +157,7 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
         is_hint = (wt == "hint")
         ax.scatter(
             emb[i, 0], emb[i, 1], c=s["color"], marker=s["marker"],
-            s=110 if is_hint else 46,
+            s=70 if is_hint else 46,   # hint kept modest; distinguished by shape+colour
             edgecolors="black" if is_hint else "white",
             linewidths=0.7 if is_hint else 0.4,
             zorder=s["order"] + 3, alpha=0.95,
@@ -292,10 +292,12 @@ def plot_layer_panels(
     fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
     footnote(
         fig,
-        f"Projection: {method.upper()} (cosine), fixed across panels. "
-        "Per-panel T = trustworthiness, C = continuity, rho = Shepard "
-        "correlation (all reducers audited in dr_quality_*.csv). Hint = diamond; "
-        "targets tagged [T]; arrow = hint to nearest word in cosine space.",
+        f"Projection: {method.upper()} (cosine), fixed across panels; layers span "
+        "network depth evenly (embeddings, quarter, mid, three-quarter, final). "
+        "Per-panel T = trustworthiness, C = continuity, rho = Shepard correlation "
+        "(all reducers audited in dr_quality_*.csv). Hint = diamond; targets "
+        "tagged [T]. Arrow points to the hint's true nearest neighbour in cosine "
+        "space: only its DIRECTION is meaningful, not its projected 2D length.",
         y=0.10,
     )
     fig.tight_layout(rect=(0, 0.16, 1, 0.96))

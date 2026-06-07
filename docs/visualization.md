@@ -69,7 +69,10 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
 - Multi-panel, one panel per representative layer (≈6 spread across depth,
   endpoints always included).
 - Coloured by **true word type**; **hint = diamond**, **targets tagged `[T]`**,
-  grey connector from hint to its nearest word in cosine space.
+  arrow from the hint to its true nearest neighbour in cosine space — only the
+  arrow's DIRECTION is meaningful, its projected 2D length is not (stated in the
+  caption). The six layers span network depth evenly (embeddings, quarter, mid,
+  three-quarter, final); this even-depth spread is also stated in the caption.
 - Rendered with the fixed reducer **UMAP (cosine)** (see §4.6 for the choice);
   each panel prints its **T / C / Shepard scores**, and the full UMAP/t-SNE/PCA
   comparison is written to `dr_quality_{condition}.csv` (column `selected` marks
