@@ -1,0 +1,335 @@
+# Visualization support — implementation report
+
+This documents the visualization pipeline added to turn the experiments' raw
+layer-wise word vectors into **inspectable, publication-formatted figures**, and
+records the design decisions, the dimensionality-reduction validation, and the
+findings from the first run on the BERT outputs.
+
+## 1. Goal
+
+The experiments already produce, per board (a Codenames Duet turn), one pooled
+hidden-state vector per `(word, layer, pooling_method)` plus a battery of scalar
+metrics (cosine-to-hint, ranks, per-layer anisotropy). What was missing was a way
+to **see** that geometry, to confirm quantitative findings against real examples.
+Two figure families were requested:
+
+1. a **2D projection** of the word vectors at fixed board+layer, to read off
+   spatial proximity layer by layer;
+2. a **word×word cosine-similarity heatmap** at fixed board+layer, including the
+   giver's demographic words in the social condition, shown without the redundant
+   (symmetric) half.
+
+A hard requirement: because projection reduces dimensionality, it must be
+**cosine-aware** and its faithfulness must be **measured**, not assumed.
+
+## 2. What was built
+
+A self-contained `codenames/viz/` package plus a `visualize` CLI subcommand.
+
+| File | Responsibility |
+|---|---|
+| `codenames/viz/loader.py` | Discover model dirs, auto-detect file prefix, join the index CSV with the `_f16.npz` matrix by `record_idx`, filter valid vectors + pooling, upcast to f32, sample boards (seed 42), parse `giver_features`. |
+| `codenames/viz/metrics.py` | Cosine-aware DR-quality metrics: trustworthiness (sklearn, `metric="cosine"`), continuity (custom dual), Shepard Spearman correlation (HD cosine vs 2D Euclidean). |
+| `codenames/viz/embedding.py` | Run UMAP/t-SNE/PCA (all cosine-aware), score + select the best per board×layer, draw the multi-panel projection. |
+| `codenames/viz/heatmap.py` | Symmetric cosine matrix, lower-triangle masking, the `no_social`/`with_social` paired heatmap. |
+| `codenames/viz/style.py` | Publication style (Okabe-Ito palette, sans-serif, despined, PDF+PNG @300 DPI), the canonical word-type → colour/marker map, layer-depth labels, representative-layer selection. |
+| `codenames/viz/pipeline.py` | Orchestration: per model, per sampled board, emit both figure families + the DR-quality CSV. |
+
+CLI: `codenames-experiment visualize --model bert` (or `--all`). The heavy
+plotting/reduction libraries are imported **lazily** inside the command handler,
+so the experiment `run`/`doctor` paths — and the Colab install — never require
+them. They live in a new optional dependency group:
+
+```toml
+[project.optional-dependencies]
+viz = ["matplotlib==3.9.2", "seaborn==0.13.2", "scikit-learn==1.5.2",
+       "umap-learn==0.5.7", "adjusttext==1.3.0"]
+```
+(`adjustText` repels word labels off the points so projection panels stay
+legible.)
+
+Install locally with `pip install -e ".[viz]"`. Verified: these resolve cleanly
+against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
+
+## 3. Figures
+
+### Heatmap (`heatmap_L{layer}.{pdf,png}`)
+- Word×word cosine at fixed board+layer, **`no_social` vs `with_social` side by
+  side**.
+- **Lower triangle only** (matrix is symmetric; the trivial unit diagonal is
+  masked too) — no redundant grid.
+- Colorblind-safe **diverging `RdBu_r` centred at 0**, symmetric vmin/vmax shared
+  across the pair, so positive vs negative association reads directly.
+- Words ordered in type blocks (hint → target → assassin → neutral → giver
+  feature); axis labels coloured by type.
+- The social panel contains **all giver-feature words the board specifies**
+  (2–9; see §5).
+
+### Projection (`tsne_{condition}_layers.{pdf,png}`)
+- Multi-panel, one panel per representative layer (≈6 spread across depth,
+  endpoints always included).
+- Coloured by **true word type**; **hint = diamond**, **targets tagged `[T]`**,
+  grey connector from hint to its nearest word in cosine space.
+- Rendered with the fixed, most-trustworthy reducer (**t-SNE, cosine**; see §4);
+  each panel prints its **T / C / Shepard scores**, and the full UMAP/t-SNE/PCA
+  comparison is written to `dr_quality_{condition}.csv` (column `selected` marks
+  the rendered method).
+
+### 3.3 Figure-construction details (for reproduction)
+
+Common style (`viz/style.py`, `apply_publication_style`): sans-serif (Arial →
+Helvetica → DejaVu Sans fallback), base font 8 pt, despined axes, white
+background, `savefig.dpi=300`, `pdf.fonttype=42` (editable embedded text). Word
+types use the **Okabe-Ito** colorblind-safe palette: hint = vermillion (◆),
+target = bluish-green (●), assassin = black (✕), neutral = orange (●),
+giver feature = sky-blue (▲).
+
+- **Heatmap** (`viz/heatmap.py`): words ordered in type blocks then
+  alphabetically; matrix = clipped `X̂ X̂ᵀ` on L2-normalised rows; upper triangle
+  **and** diagonal masked (`np.triu(..., k=0)`); `cmap="RdBu_r"`, `center=0`, and
+  **symmetric limits** `vmin=−v, vmax=+v` where `v = max(|off-diagonal|)` across
+  both panels (≥0.1) so the pair is directly comparable; cells annotated when
+  `n ≤ 28`; one shared colorbar; axis labels coloured by word type plus a patch
+  legend.
+- **Projection** (`viz/embedding.py`): markers carry a thin **white edge**
+  (hint: black edge, larger) to separate overlapping points; the hint→nearest
+  connector is an arrow drawn *under* the markers; word labels are repelled with
+  **`adjustText`** (`expand=(1.15, 1.3)`, leader lines in light grey) so text does
+  not overlap points or other text; ≈6 layers per figure in a 3-column grid;
+  per-panel score box and a shared word-type legend.
+- **Determinism:** board sampling, t-SNE, and UMAP all take the same `--seed`
+  (default 42); reruns are identical.
+
+## 4. Dimensionality-reduction validation (the key requirement)
+
+This section is written to be reusable in the thesis methodology chapter: it
+states the problem, the metrics with their definitions, the experimental
+protocol, the full results, and the resulting design decision.
+
+### 4.1 The problem
+
+A 2D projection is only worth showing if the *neighbourhood structure* of the
+original space survives the reduction. Our original space is compared by **cosine
+similarity** (each word vector is the pooled sub-token hidden state; magnitude is
+not the quantity of interest). Two failure modes must be controlled:
+
+- **false neighbours** — points placed close in 2D that were far apart in cosine
+  space (the projection *invents* proximity);
+- **missing neighbours** — points that were close in cosine space but are torn
+  apart in 2D (the projection *destroys* proximity).
+
+A single global statistic (e.g. a correlation of distances) cannot separate
+these; we therefore use rank-based local metrics plus one global metric.
+
+### 4.2 Metrics (definitions)
+
+Let `n` be the number of words on a board at a fixed layer. For point *i*, let
+`r(i, j)` be the rank of *j* among *i*'s neighbours (1 = nearest) in a given
+space. High-dimensional ranks use **cosine distance** `d_cos = 1 − cosθ`;
+2D ranks use **Euclidean distance**. Fix a neighbourhood size *k* (default 5,
+clamped to `(n−1)//2` for small boards).
+
+- **Trustworthiness** `T(k) ∈ [0,1]` (Venna & Kaski, 2001), via scikit-learn
+  with `metric="cosine"`:
+
+  ```
+  T(k) = 1 − (2 / (n·k·(2n − 3k − 1))) · Σ_i Σ_{j∈U_k(i)} (r_high(i,j) − k)
+  ```
+
+  where `U_k(i)` is the set of points among *i*'s *k* nearest in **2D** that were
+  **not** among its *k* nearest in cosine space. Penalises false neighbours.
+
+- **Continuity** `C(k) ∈ [0,1]` — the dual, implemented in `metrics.py`: same
+  formula with the roles of the two spaces swapped (`V_k(i)` = true cosine
+  neighbours demoted out of the 2D neighbourhood, weighted by their 2D rank).
+  Penalises missing neighbours.
+
+- **Shepard correlation** `ρ ∈ [−1,1]` — the Spearman rank correlation between
+  all `n(n−1)/2` pairwise **cosine** distances (HD) and **Euclidean** distances
+  (2D); the numeric summary of the Shepard diagram. Measures *global* monotone
+  distance preservation.
+
+A perfect isometric embedding scores `T = C = 1`, `ρ ≈ 1`; this is asserted in
+`tests/test_viz.py::test_metrics_isometric_embedding_is_near_perfect`.
+
+### 4.3 Candidate reducers (all cosine-aware)
+
+| Reducer | Configuration | Why cosine-aware |
+|---|---|---|
+| **t-SNE** | `sklearn.manifold.TSNE`, `metric="cosine"`, `init="pca"`, `perplexity = clip((n−1)/3, 2, 30)`, `random_state=seed` | neighbour affinities computed directly from cosine distances |
+| **UMAP** | `umap.UMAP`, `metric="cosine"`, `n_neighbors = clip(n−1, 2, 15)`, `min_dist=0.1`, `random_state=seed` | fuzzy simplicial set built on cosine distances |
+| **PCA** | `sklearn.decomposition.PCA(2)` on **L2-normalised** vectors | on the unit sphere, Euclidean distance is a monotone function of cosine distance, so linear PCA operates in cosine geometry |
+
+`perplexity`/`n_neighbors` are adapted to the small board sizes so the reducers
+remain well defined; vectors are upcast f16→f32 and L2-normalised before every
+fit.
+
+### 4.4 Protocol
+
+For each (board, layer, condition) the pipeline fits **all three** reducers once
+(`embedding.embed_all`), computes `T`, `C`, `ρ` for each, and records every row
+to `dr_quality_{condition}.csv` (with a `selected` flag). A single comparable
+score is the mean of the three diagnostics, treating NaN as 0 and clamping the
+Shepard term to its non-negative part:
+
+```
+combined = mean( T, C, max(0, ρ) )
+```
+
+This protocol is the *audit*; the **rendered** reducer is fixed (§4.6).
+
+### 4.5 Results (BERT, first run: 5 boards × 6 layers × 2 conditions = 60 cases)
+
+Reproduce with: `codenames-experiment visualize --model bert --n-boards 5`,
+then aggregate the `dr_quality_*.csv` files.
+
+**(a) Which reducer scores best, per case**
+
+| Method | Times best (of 60) |
+|---|---|
+| t-SNE (cosine) | 34 |
+| PCA (normalised) | 17 |
+| UMAP (cosine) | 9 |
+
+**(b) Mean diagnostics per method, over all 60 cases**
+
+| Method | Trustworthiness | Continuity | Shepard ρ | Combined |
+|---|---|---|---|---|
+| **t-SNE** | **0.849** | **0.848** | 0.632 | **0.776** |
+| PCA | 0.808 | 0.834 | **0.658** | 0.767 |
+| UMAP | 0.824 | 0.820 | 0.541 | 0.728 |
+
+**(c) Mean diagnostics by layer (best-per-case method)**
+
+| Layer | n | Trustworthiness | Continuity | Shepard ρ |
+|---|---|---|---|---|
+| 0 (embeddings) | 10 | 0.854 | 0.820 | 0.554 |
+| 2 | 10 | 0.846 | 0.831 | 0.561 |
+| 5 | 10 | 0.852 | 0.871 | 0.694 |
+| 7 | 10 | 0.854 | 0.880 | 0.693 |
+| 10 | 10 | 0.847 | 0.869 | 0.744 |
+| 12 (final) | 10 | 0.870 | 0.879 | 0.783 |
+
+### 4.6 Decision and its justification
+
+**The figures render a single reducer — t-SNE with `metric="cosine"`.** Rationale:
+
+1. **Highest local fidelity.** t-SNE has the best mean trustworthiness (0.849)
+   and continuity (0.848), and is the per-case best in 34/60 cases — more than
+   UMAP and PCA combined. The projection's purpose is *local* proximity reading
+   (which words sit near the hint/target), exactly what trustworthiness and
+   continuity measure.
+2. **Comparability across panels.** Letting the reducer vary per panel mixes
+   incomparable layouts (PCA axes are linear; t-SNE/UMAP are not), which is
+   misleading when scanning a board across layers. A fixed method gives one
+   visual grammar.
+3. **PCA's edge is only global.** PCA wins marginally on Shepard ρ (0.658 vs
+   0.632) — global monotone distance — but that is the metric *least* relevant to
+   reading local neighbourhoods, and PCA is visibly worse locally.
+4. **UMAP is out of regime.** With ≈17–26 points per board, UMAP is far below the
+   density it needs; it has the weakest Shepard (0.541) and is rarely best.
+
+The audit CSV is retained so any panel's reliability can still be checked, and
+each rendered panel prints its own `T / C / ρ`.
+
+### 4.7 How to read the numbers (caveats for the thesis)
+
+- **Local fidelity is good** (`T, C ≈ 0.82–0.88` for the selected method): the
+  near/far relationships in the figures are largely trustworthy.
+- **Global distance preservation is modest at shallow layers** (`ρ ≈ 0.55` at the
+  embedding layer) and **improves monotonically with depth** (`ρ ≈ 0.78` at the
+  final layer): deeper representations flatten into a structure a 2D map captures
+  more honestly. **Do not** read absolute inter-cluster distances off shallow-
+  layer panels.
+- Small `n` makes every metric higher-variance; treat per-panel scores as
+  indicative, and prefer the aggregated tables above for general claims.
+
+## 5. Findings from the BERT run
+
+- **Giver-feature clustering (social condition).** On the demographically rich
+  boards the giver-feature words form a **distinct cluster** in the projection,
+  separated from the board vocabulary across all layers — a clean visual of the
+  social context occupying its own region of representation space.
+- **High global anisotropy.** The heatmaps are overwhelmingly warm (most cosines
+  positive, ~0.3–0.7) with few near-zero/negative cells, the visual signature of
+  the high anisotropy the scalar metrics report for BERT.
+- **Depth-dependent legibility.** Both the rising Shepard correlation and the
+  cleaner deep-layer projections corroborate that geometry becomes more
+  2D-faithful with depth.
+
+### 5.4 Worked example — board 2521 (`cream → mammoth`), a low-quality human clue
+
+A useful validation case surfaced during review. Board **2521** is a single-target
+turn whose human clue is `hint = "cream"`, `target = "mammoth"` — a semantically
+odd association. The figures let us interrogate it directly:
+
+- In the projection (`tsne_no_social_layers`), the **arrow from the hint
+  (`cream`) to its nearest word in cosine space points to `drop` / `wake` /
+  `slip`, never to `mammoth`**, at every layer. The model does not reconstruct
+  the human association.
+- This matches the scalar outputs: `predicted_word_mean = "drop"`,
+  `correct_mean = False` — i.e. BERT's nearest-to-hint candidate is not the
+  intended target.
+
+So the visualization corroborates a finding rather than contradicting one: this
+is an example of an idiosyncratic human clue whose association is **not** encoded
+geometrically by the model. (For contrast, board 1263 `elephant → mammoth` is
+predicted correctly — `mammoth` is the nearest candidate to `elephant`.) Such
+cases are worth flagging in the thesis as the lower tail of human-clue quality in
+CULTURAL CODES.
+
+> Note: the same word can play different roles on different boards. `mammoth` is
+> the **target** on boards 2521/1263/4054 but an **assassin** on board 565 (whose
+> clue is `bright → {genius, light}`). The figures encode role by colour/marker,
+> so an assassin is never mistaken for a target once labels are read.
+
+### 5.5 Data provenance and faithfulness
+
+`row_id` is assigned in `codenames/data.py::load_dataset` as the 0-based position
+in `clue_generation.csv` after `pd.read_csv(...).reset_index(drop=True)` — no
+rows are dropped first — so `row_id = N` corresponds to the *(N+2)*-th line of the
+CSV (header + 0-based). The visualization carries `hint`, `targets`, `black`,
+`tan`, and `giver_features` straight from that row; it performs **no
+re-derivation** of board roles. A surprising play (like `cream → mammoth`) is
+therefore faithful to the source dataset, not an artefact of the pipeline; it can
+be confirmed against the corresponding `clue_generation.csv` row.
+
+## 6. Reproducibility & tests
+
+- Board sampling, t-SNE, and UMAP are all seeded (default 42); reruns are
+  deterministic.
+- `tests/test_viz.py` adds 18 unit tests (cosine-matrix symmetry/limits, triangle
+  masking, type-block ordering, index↔NPZ join + invalid-vector dropping,
+  reproducible sampling, `giver_features` parsing, DR metrics on a known
+  isometric embedding, reducer selection). The reducer-dependent tests are
+  `importorskip`-guarded so the **core suite stays green without `[viz]`
+  installed**. Full suite: **60 passed**.
+- Confirmed the core `codenames.cli` import pulls in **none** of
+  matplotlib/umap/sklearn/seaborn (lazy-import guard intact).
+
+## 7. Scope, limitations, things to note
+
+- **Only `output/bert/` exists locally**, so figures were produced for BERT. The
+  pipeline is model-agnostic and auto-discovers `mistral`, `qwen`, etc. the
+  moment their output folders are present (`--all` sweeps all of them).
+- **Giver-feature count is a property of the source board, not the pipeline.**
+  Boards specify 2–9 demographic attributes (mean 7.5); the figures show exactly
+  those that have stored vectors. Boards with few attributes (e.g. board 565 has
+  2) are faithful, not truncated.
+- **Vectors are the retained subsample only** (the 100 boards with raw vectors),
+  so board sampling necessarily draws from that subsample.
+- **Rendered images are not committed** (`.gitignore`); the per-board
+  `dr_quality_*.csv` and this report are. Regenerate images with the command
+  below.
+
+## 8. Usage
+
+```bash
+pip install -e ".[viz]"
+codenames-experiment visualize --model bert            # 5 boards, mean pooling
+codenames-experiment visualize --model bert --n-boards 8 --layers 0,6,12
+codenames-experiment visualize --all                   # every model under output/
+```
+
+Output: `visualization/{model}/board_{row_id}/` containing `heatmap_L*.{pdf,png}`,
+`tsne_{condition}_layers.{pdf,png}`, and `dr_quality_{condition}.csv`.

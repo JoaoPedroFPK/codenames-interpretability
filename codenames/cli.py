@@ -193,6 +193,39 @@ def _make_sanity_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentPa
     return p
 
 
+def _make_visualize_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "visualize",
+        help="Render heatmap + 2D-projection figures from extracted outputs.",
+        description=(
+            "Local, post-hoc visualization. Reads {prefix}_vectors_subsample_* "
+            "files from --output-dir/<model>/, samples boards, and writes "
+            "publication-formatted figures (cosine heatmaps + cosine-aware UMAP/"
+            "t-SNE/PCA projections, validated by trustworthiness/continuity/"
+            "Shepard metrics) under --viz-dir. Requires the optional [viz] "
+            "dependency group: pip install -e \".[viz]\"."
+        ),
+    )
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--model", choices=list(MODEL_REGISTRY),
+                   help="Single model to visualize (looks under <output-dir>/<model>/).")
+    g.add_argument("--all", action="store_true",
+                   help="Visualize every model directory discovered under --output-dir.")
+    p.add_argument("--output-dir", default="output",
+                   help="Root directory holding per-model output folders (default: output).")
+    p.add_argument("--viz-dir", default="visualization",
+                   help="Directory to write figures into (default: visualization).")
+    p.add_argument("--n-boards", type=int, default=5,
+                   help="Number of boards to sample per model/condition (default: 5).")
+    p.add_argument("--pooling", default="mean", choices=["mean", "max_norm"],
+                   help="Span-pooling method to visualize (default: mean).")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed for board sampling and reducers (default: 42).")
+    p.add_argument("--layers", default=None,
+                   help="Comma-separated explicit layer indices; default picks ~6 by depth.")
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -702,6 +735,36 @@ def _cmd_sanity(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_visualize(args: argparse.Namespace) -> int:
+    """Render figures from already-extracted outputs.
+
+    The heavy plotting/reduction libraries live in the optional ``[viz]`` group
+    and are imported lazily here, so ``run``/``doctor`` never require them.
+    """
+    try:
+        from .viz import pipeline as viz_pipeline
+    except ImportError as exc:
+        raise SystemExit(
+            "Visualization dependencies are not installed. "
+            'Install them with: pip install -e ".[viz]"\n'
+            f"(import error: {exc})"
+        )
+
+    layers = None
+    if args.layers:
+        layers = [int(x) for x in args.layers.split(",") if x.strip()]
+
+    common = dict(
+        output_root=args.output_dir, viz_dir=args.viz_dir,
+        n_boards=args.n_boards, pooling=args.pooling, layers=layers, seed=args.seed,
+    )
+    if args.all:
+        viz_pipeline.run_all(**common)
+    else:
+        viz_pipeline.run(args.model, **common)
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -721,6 +784,7 @@ def main(argv=None) -> int:
     _make_validate_parser(sp)
     _make_compare_parser(sp)
     _make_sanity_parser(sp)
+    _make_visualize_parser(sp)
 
     args = parser.parse_args(argv)
 
@@ -736,6 +800,8 @@ def main(argv=None) -> int:
         return _cmd_compare(args)
     if args.command == "sanity":
         return _cmd_sanity(args)
+    if args.command == "visualize":
+        return _cmd_visualize(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

@@ -37,9 +37,23 @@ ENV/
 
 # Claude Code local overrides (project settings.local.json is gitignored)
 .claude/settings.local.json
+# Vendored skill checkouts (have their own nested .git) — tooling, not project code
+.claude/skills/
 
 
 # Local output data from experiments, not to be committed
 /output
+
+# Generated visualization output (figures + per-board dr_quality CSVs) —
+# regenerated on demand via `codenames-experiment visualize`. This is output
+# data; the methods and docs/visualization.md are committed, the output is not.
+/visualization/
+
+# Reference example images for the visualization task (inputs, not generated)
+/heatmap.png
+/umap.png
+
+# Visualization unit tests are kept locally for verification but not committed.
+tests/test_viz.py
 
 *_TASK.md

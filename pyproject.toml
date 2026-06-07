@@ -30,6 +30,19 @@ dependencies = [
     "accelerate==1.2.1",
 ]
 
+[project.optional-dependencies]
+# Local, post-hoc visualization only. NOT installed in Colab and NOT imported by
+# the experiment run/doctor paths, so these are deliberately kept out of the core
+# `dependencies` pin set (which is tuned to coexist with Colab's stack). Install
+# locally with `pip install -e ".[viz]"`. Pinned for reproducible figures.
+viz = [
+    "matplotlib==3.9.2",
+    "seaborn==0.13.2",
+    "scikit-learn==1.5.2",
+    "umap-learn==0.5.7",
+    "adjusttext==1.3.0",
+]
+
 [project.scripts]
 codenames-experiment = "codenames.cli:main"
 
