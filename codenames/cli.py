@@ -90,6 +90,27 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
     return p
 
 
+def _make_doctor_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "doctor",
+        help="Verify installed dependencies match the pinned, reproducible set.",
+        description=(
+            "Read-only dependency check: confirms the installed package "
+            "versions match the pins in pyproject.toml, that the installed "
+            "transformers exposes each model's classes, and reports Python / "
+            "CUDA / flash_attn status. Downloads no weights and changes "
+            "nothing. Exits non-zero on any hard failure."
+        ),
+    )
+    p.add_argument("--model", default=None, choices=list(MODEL_REGISTRY),
+                   help="Only check this model's transformers classes (default: all).")
+    p.add_argument("--allow-drift", action="store_true",
+                   help="Treat a version mismatch against the pin as a warning, not a failure.")
+    p.add_argument("--require-cuda", action="store_true",
+                   help="Fail if a CUDA device is not available.")
+    return p
+
+
 def _make_preflight_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
     p = sp.add_parser(
         "preflight",
@@ -172,6 +193,18 @@ def _make_sanity_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentPa
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    from . import depcheck
+
+    models = [args.model] if args.model else None
+    ok = depcheck.run(
+        models=models,
+        allow_drift=args.allow_drift,
+        require_cuda=args.require_cuda,
+    )
+    return 0 if ok else 1
+
 
 def _cmd_run(args: argparse.Namespace) -> int:
     from .contract import Acceleration, CONTRACT_V1, Contract
@@ -674,6 +707,7 @@ def main(argv=None) -> int:
         ),
     )
     sp = parser.add_subparsers(dest="command", required=True)
+    _make_doctor_parser(sp)
     _make_run_parser(sp)
     _make_preflight_parser(sp)
     _make_validate_parser(sp)
@@ -682,6 +716,8 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command == "doctor":
+        return _cmd_doctor(args)
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "preflight":
