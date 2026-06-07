@@ -39,12 +39,17 @@ OKABE_ITO: Dict[str, str] = {
 # Canonical word-type styling — the SINGLE source of truth for colour + marker +
 # legend label + ordering, used identically by markers (projection) and
 # axis-label colours (heatmap). ``order`` fixes legend order and z-order.
+# Marker shapes are all distinct (D/o/X/s/^) so type survives in grayscale even
+# where colour collapses. Giver-feature uses the darker Okabe blue (#0072B2,
+# luminance ~87) rather than sky-blue (~158): in the heatmap, type is encoded by
+# axis-label colour ALONE, and sky-blue was nearly iso-luminant with Neutral
+# amber (~162), so the two collapsed in grayscale. See Task 2 audit.
 WORD_TYPE_STYLE: Dict[str, Dict] = {
     "hint":          {"label": "Hint",          "color": OKABE_ITO["vermillion"],   "marker": "D", "order": 5},
     "target":        {"label": "Target",        "color": OKABE_ITO["bluish_green"], "marker": "o", "order": 4},
     "black":         {"label": "Assassin",      "color": OKABE_ITO["black"],        "marker": "X", "order": 3},
-    "tan":           {"label": "Neutral",       "color": OKABE_ITO["orange"],       "marker": "o", "order": 1},
-    "giver_feature": {"label": "Giver feature", "color": OKABE_ITO["sky_blue"],     "marker": "^", "order": 2},
+    "tan":           {"label": "Neutral",       "color": OKABE_ITO["orange"],       "marker": "s", "order": 1},
+    "giver_feature": {"label": "Giver feature", "color": OKABE_ITO["blue"],         "marker": "^", "order": 2},
 }
 
 # Fallback for any unexpected word_type so the pipeline never crashes.

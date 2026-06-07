@@ -80,9 +80,12 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
 Common style (`viz/style.py`, `apply_publication_style`): sans-serif (Arial →
 Helvetica → DejaVu Sans fallback), base font 8 pt, despined axes, white
 background, `savefig.dpi=300`, `pdf.fonttype=42` (editable embedded text). Word
-types use the **Okabe-Ito** colorblind-safe palette: hint = vermillion (◆),
-target = bluish-green (●), assassin = black (✕), neutral = orange (●),
-giver feature = sky-blue (▲).
+types use the **Okabe-Ito** colorblind-safe palette with all-distinct marker
+shapes (so type survives in grayscale): hint = vermillion diamond, target =
+bluish-green circle, assassin = black ✕, neutral = orange square, giver feature =
+blue (#0072B2) triangle. Giver-feature uses the darker blue rather than sky-blue
+so its axis-label colour does not collapse against Neutral amber in grayscale
+(luminance ~87 vs ~162); see the Task 2 grayscale/colorblind audit.
 
 - **Heatmap** (`viz/heatmap.py`): words ordered in type blocks then
   alphabetically; matrix = clipped `X̂ X̂ᵀ` on L2-normalised rows; upper triangle
