@@ -63,9 +63,10 @@ def load_mistral_instruct(
     if resolved_attn == "flash_attention_2" and not _flash_attn_importable():
         print(
             "WARNING: attn_implementation='flash_attention_2' requested but "
-            "flash_attn is not importable. Falling back to 'eager'."
+            "flash_attn is not importable. Falling back to 'sdpa' (PyTorch "
+            "scaled_dot_product_attention) — far faster than 'eager' on GPU."
         )
-        resolved_attn = "eager"
+        resolved_attn = "sdpa"
 
     load_kwargs: Dict[str, Any] = {
         "torch_dtype": torch.float16,
