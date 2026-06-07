@@ -37,3 +37,9 @@ ENV/
 
 # Claude Code local overrides (project settings.local.json is gitignored)
 .claude/settings.local.json
+
+
+# Local output data from experiments, not to be committed
+/output
+
+*_TASK.md
