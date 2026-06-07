@@ -18,7 +18,6 @@ from .style import (
     FS,
     add_word_type_legend,
     apply_publication_style,
-    footnote,
     style_for,
 )
 
@@ -173,23 +172,16 @@ def plot_heatmap_pair(
         for lbl, wt in zip(ax.get_yticklabels(), y_types):
             lbl.set_color(style_for(wt)["color"])
 
-    fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
-
-    # Single house legend (word-type taxonomy; colours match the axis labels).
+    # No figure-level suptitle or footnote (matches the example and the
+    # projection): the "No social"/"With social" panel headers stay, while board/
+    # layer identity and the methodology note (lower triangle, Reds, matched
+    # ordering) live in the filename and the LaTeX caption (docs §3.4). The
+    # word-type legend is kept at the bottom as a small interpretation aid.
     types_present = set()
     for mode in modes:
         if prepared[mode]:
             types_present.update(prepared[mode]["word_types"])
     add_word_type_legend(fig, types_present, y=0.02)
-    footnote(
-        fig,
-        "Lower triangle only (matrix is symmetric; the self-similarity diagonal "
-        "and the empty first row / last column are trimmed). Sequential Reds: "
-        "darker = higher cosine. Both panels share an identical word ordering, so "
-        "shared cells diff directly; giver-feature rows/cols append only in the "
-        "with-social panel.",
-        y=0.11,
-    )
-    fig.subplots_adjust(left=0.06, right=0.9, top=0.9, bottom=0.24, wspace=0.25)
+    fig.subplots_adjust(left=0.06, right=0.9, top=0.94, bottom=0.20, wspace=0.25)
     info = {"layer": layer, "vmax": vmax}
     return fig, info
