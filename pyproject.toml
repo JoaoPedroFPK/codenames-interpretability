@@ -13,7 +13,12 @@ authors = [{ name = "TCC" }]
 keywords = ["interpretability", "transformers", "geometric-analysis", "codenames"]
 
 dependencies = [
+    # Pin the full torch stack together: transformers transitively imports
+    # torchvision on every model load, so a torchvision built against a
+    # different torch crashes with "operator torchvision::nms does not exist".
     "torch==2.5.1",
+    "torchvision==0.20.1",
+    "torchaudio==2.5.1",
     "transformers==4.48.0",
     "numpy==2.1.3",
     "pandas==2.2.3",
