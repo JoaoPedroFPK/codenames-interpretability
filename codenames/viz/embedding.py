@@ -20,7 +20,6 @@ from .style import (
     add_word_type_legend,
     apply_publication_style,
     depth_label,
-    footnote,
     grid_size,
     style_for,
 )
@@ -163,31 +162,34 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
             zorder=s["order"] + 3, alpha=0.95,
         )
 
-    # Connector: hint -> nearest word in cosine space (drawn under everything).
+    # Connector: a thin line (no arrowhead) from the hint to its nearest word in
+    # cosine space, drawn under the markers — matches the projection example.
     j = _nearest_to_hint(vectors, word_types)
     hint_idx = [i for i, t in enumerate(word_types) if t == "hint"]
     if j is not None and hint_idx:
         h = hint_idx[0]
-        ax.annotate(
-            "", xy=(emb[j, 0], emb[j, 1]), xytext=(emb[h, 0], emb[h, 1]),
-            arrowprops=dict(arrowstyle="->", color="#8a8a8a", lw=0.8,
-                            alpha=0.8, shrinkA=4, shrinkB=4),
-            zorder=2,
+        ax.plot(
+            [emb[h, 0], emb[j, 0]], [emb[h, 1], emb[j, 1]],
+            color="#4f8a9c", lw=0.8, alpha=0.75, zorder=2, solid_capstyle="round",
         )
 
-    # Labels: repelled off the points with thin leader lines.
+    # Labels: subtle. Hint and target labels take their type colour and bold; the
+    # rest recede in light grey. Repelled off the points with thin leader lines.
     texts = []
     for i, wt in enumerate(word_types):
         label = f"{words[i]} [T]" if wt == "target" else words[i]
-        weight = "bold" if wt in ("hint", "target") else "normal"
+        if wt in ("hint", "target"):
+            col, weight = style_for(wt)["color"], "bold"
+        else:
+            col, weight = "#9a9a9a", "normal"
         texts.append(ax.text(
-            emb[i, 0], emb[i, 1], label, fontsize=FS["word_label"], color="#222222",
+            emb[i, 0], emb[i, 1], label, fontsize=FS["word_label"], color=col,
             fontweight=weight, zorder=11,
         ))
     if adjust_text is not None and texts:
         adjust_text(
             texts, ax=ax,
-            arrowprops=dict(arrowstyle="-", color="#bdbdbd", lw=0.3),
+            arrowprops=dict(arrowstyle="-", color="#d0d0d0", lw=0.3),
             expand=(1.15, 1.3), force_text=(0.4, 0.6),
             only_move={"text": "xy", "static": "xy", "explode": "xy", "pull": "xy"},
         )
@@ -198,14 +200,6 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
     ax.set_ylabel(f"{method_name} 2", fontsize=FS["axis_label"])
     ax.set_xticks([]); ax.set_yticks([])
     ax.margins(0.16)
-    ax.text(
-        0.02, 0.02,
-        f"{method_name}  T={scores['trustworthiness']:.2f}"
-        f"  C={scores['continuity']:.2f}  rho={scores['shepard']:.2f}",
-        transform=ax.transAxes, fontsize=FS["annot"], va="bottom", ha="left",
-        color="#555555",
-        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
-    )
 
 
 def plot_layer_panels(
@@ -238,7 +232,7 @@ def plot_layer_panels(
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=grid_size(n_cols, n_rows, panel_aspect=1.0,
-                          header_in=0.5, footer_in=1.3),
+                          header_in=0.5, footer_in=0.3),
         squeeze=False,
     )
 
@@ -286,19 +280,12 @@ def plot_layer_panels(
         r, c = divmod(panel_i, n_cols)
         axes[r][c].axis("off")
 
-    # Shared house legend (word-type taxonomy) + light footnote, with the
-    # footnote clearly above the legend so they never collide.
-    add_word_type_legend(fig, sorted(all_types_present), y=0.02)
+    # Compact framed legend in the top-right corner (matches the example). No
+    # on-figure footnote: the explanatory text (even-depth layers; the connector
+    # marks the hint's true cosine nearest-neighbour, direction-only; reducer
+    # validation in dr_quality_*.csv) belongs in the LaTeX figure caption — see
+    # the suggested caption in docs/visualization.md.
+    add_word_type_legend(fig, sorted(all_types_present), corner=True)
     fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
-    footnote(
-        fig,
-        f"Projection: {method.upper()} (cosine), fixed across panels; layers span "
-        "network depth evenly (embeddings, quarter, mid, three-quarter, final). "
-        "Per-panel T = trustworthiness, C = continuity, rho = Shepard correlation "
-        "(all reducers audited in dr_quality_*.csv). Hint = diamond; targets "
-        "tagged [T]. Arrow points to the hint's true nearest neighbour in cosine "
-        "space: only its DIRECTION is meaningful, not its projected 2D length.",
-        y=0.10,
-    )
-    fig.tight_layout(rect=(0, 0.16, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.0, 1, 0.95))
     return fig, records

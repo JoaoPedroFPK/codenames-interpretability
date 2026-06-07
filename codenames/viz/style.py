@@ -153,13 +153,24 @@ def legend_handles(word_types: Sequence[str]):
     return handles
 
 
-def add_word_type_legend(fig, word_types: Sequence[str], *, y: float = 0.01):
-    """Place the single house word-type legend (marker swatches, canonical order)
-    at the bottom centre of ``fig``. No-op if no known types are present.
+def add_word_type_legend(fig, word_types: Sequence[str], *, y: float = 0.01,
+                         corner: bool = False):
+    """Place the single house word-type legend (marker swatches, canonical order).
+
+    Default: a horizontal legend at the bottom centre. ``corner=True``: a compact,
+    lightly-framed vertical legend in the top-right corner (matches the thesis
+    projection example). No-op if no known types are present.
     """
     handles = legend_handles(word_types)
     if not handles:
         return None
+    if corner:
+        return fig.legend(
+            handles=handles, loc="upper right", bbox_to_anchor=(0.995, 0.985),
+            ncol=1, title="Word type", title_fontsize=FS["legend_title"],
+            fontsize=FS["legend"], frameon=True, framealpha=0.92,
+            edgecolor="#cccccc", borderpad=0.6, handletextpad=0.4,
+        )
     return fig.legend(
         handles=handles, loc="lower center", ncol=len(handles),
         bbox_to_anchor=(0.5, y), title="Word type",

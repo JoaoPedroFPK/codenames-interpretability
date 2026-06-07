@@ -75,10 +75,14 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
 - Multi-panel, one panel per representative layer (≈6 spread across depth,
   endpoints always included).
 - Coloured by **true word type**; **hint = diamond**, **targets tagged `[T]`**,
-  arrow from the hint to its true nearest neighbour in cosine space — only the
-  arrow's DIRECTION is meaningful, its projected 2D length is not (stated in the
-  caption). The six layers span network depth evenly (embeddings, quarter, mid,
-  three-quarter, final); this even-depth spread is also stated in the caption.
+  and a **thin line** from the hint to its true nearest neighbour in cosine space
+  (only the line's direction is meaningful — its projected 2D length is not). The
+  six layers span network depth evenly (embeddings, quarter, mid, three-quarter,
+  final). Matches the thesis projection example (`umap.png`): a compact framed
+  legend in the top-right corner, subtle grey labels (hint/target highlighted),
+  and **no on-figure footnote or metric box** — that explanatory text belongs in
+  the LaTeX `\caption` (suggested wording in §3.4). Reducer-quality metrics live
+  in `dr_quality_{condition}.csv`.
 - Rendered with the fixed reducer **UMAP (cosine)** (see §4.6 for the choice);
   each panel prints its **T / C / Shepard scores**, and the full UMAP/t-SNE/PCA
   comparison is written to `dr_quality_{condition}.csv` (column `selected` marks
@@ -106,13 +110,37 @@ so its axis-label colour does not collapse against Neutral amber in grayscale
   shared colorbar; axis labels coloured by word type plus the shared word-type
   legend.
 - **Projection** (`viz/embedding.py`): markers carry a thin **white edge**
-  (hint: black edge, larger) to separate overlapping points; the hint→nearest
-  connector is an arrow drawn *under* the markers; word labels are repelled with
-  **`adjustText`** (`expand=(1.15, 1.3)`, leader lines in light grey) so text does
-  not overlap points or other text; ≈6 layers per figure in a 3-column grid;
-  per-panel score box and a shared word-type legend.
+  (hint: black edge, modestly larger) to separate overlapping points; the
+  hint→nearest connector is a thin teal **line** (`#4f8a9c`, no arrowhead) drawn
+  *under* the markers; word labels are repelled with **`adjustText`**
+  (`expand=(1.15, 1.3)`, leader lines in light grey), hint/target labels in their
+  type colour and bold, the rest in light grey; ≈6 layers per figure in a
+  3-column grid; a compact framed legend in the **top-right corner**; **no
+  per-panel metric box and no footnote** (caption goes in LaTeX, §3.4).
 - **Determinism:** board sampling, t-SNE, and UMAP all take the same `--seed`
   (default 42); reruns are identical.
+
+### 3.4 Suggested LaTeX captions
+
+The figures are kept clean (no on-figure footnotes), so the explanatory text
+lives in the `\caption`. Suggested wording:
+
+**Projection.** "Layer-wise UMAP (cosine metric) of the per-word hidden-state
+vectors for board {id} (hint *{hint}*), {condition}. The six panels span network
+depth evenly (embeddings, quarter, mid, three-quarter, final). Markers encode
+word type (see legend); the hint is a diamond and targets are tagged [T]. The
+line links the hint to its nearest neighbour in cosine space — only its direction
+is meaningful, not its projected 2-D length. UMAP was selected as the most
+trustworthy of UMAP/t-SNE/PCA on these per-board sets; per-panel trustworthiness,
+continuity and Shepard correlation are reported in the supplementary
+`dr_quality` tables."
+
+**Heatmap.** "Word×word cosine similarity at layer {L} for board {id} (hint
+*{hint}*), no-social vs with-social. Only the lower triangle is shown (the matrix
+is symmetric); both panels share an identical word ordering so shared cells can
+be compared directly, and the giver-feature rows/cols append only in the
+with-social panel. Sequential Reds: darker = higher cosine. Axis-label colours
+encode word type."
 
 ## 4. Dimensionality-reduction validation (the key requirement)
 
