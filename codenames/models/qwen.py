@@ -56,7 +56,7 @@ def load_qwen_instruct(
         resolved_attn = "eager"
 
     load_kwargs: Dict[str, Any] = {
-        "dtype": torch.float16,
+        "torch_dtype": torch.float16,
         "device_map": None,
         "low_cpu_mem_usage": False,
     }

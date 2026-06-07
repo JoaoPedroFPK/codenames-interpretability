@@ -47,7 +47,7 @@ def load_modernbert() -> Tuple[Any, Any, Dict[str, Any]]:
     # is passed at inference time in run_instance.
     model = AutoModel.from_pretrained(
         model_name,
-        dtype=torch.float16,
+        torch_dtype=torch.float16,
         attn_implementation=attn_impl,
     ).to(device)
 
