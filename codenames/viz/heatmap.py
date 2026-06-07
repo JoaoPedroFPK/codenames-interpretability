@@ -10,7 +10,7 @@ values match the thesis example figures.
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -60,6 +60,7 @@ def plot_heatmap_pair(
     layer: int,
     title: str,
     annotate_max_words: int = 40,
+    label_map: Optional[Dict[str, str]] = None,
 ) -> Tuple["object", Dict]:
     """Draw the ``no_social`` / ``with_social`` heatmap pair for one layer.
 
@@ -70,6 +71,7 @@ def plot_heatmap_pair(
     import seaborn as sns
 
     apply_publication_style()
+    lmap = label_map or {}
 
     modes = ["no_social", "with_social"]
 
@@ -149,7 +151,8 @@ def plot_heatmap_pair(
             vmin=vmin, vmax=vmax, square=True,
             annot=annot, fmt=".2f", annot_kws={"size": FS["annot"]},
             linewidths=0.5, linecolor="white",
-            xticklabels=x_words, yticklabels=y_words,
+            xticklabels=[lmap.get(w, w) for w in x_words],
+            yticklabels=[lmap.get(w, w) for w in y_words],
             cbar=(ax_i == 0), cbar_ax=(cbar_ax if ax_i == 0 else None),
             cbar_kws={"label": "Cosine similarity"},
         )

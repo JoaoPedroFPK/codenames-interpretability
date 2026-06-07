@@ -39,21 +39,32 @@ OKABE_ITO: Dict[str, str] = {
 # Canonical word-type styling — the SINGLE source of truth for colour + marker +
 # legend label + ordering, used identically by markers (projection) and
 # axis-label colours (heatmap). ``order`` fixes legend order and z-order.
-# Marker shapes are all distinct (D/o/X/s/^) so type survives in grayscale even
-# where colour collapses. Giver-feature uses the darker Okabe blue (#0072B2,
-# luminance ~87) rather than sky-blue (~158): in the heatmap, type is encoded by
-# axis-label colour ALONE, and sky-blue was nearly iso-luminant with Neutral
-# amber (~162), so the two collapsed in grayscale. See Task 2 audit.
+# Muted, paper-like palette matching the thesis projection example (umap.png):
+# soft brick / teal / tan / charcoal / steel rather than saturated screen colours.
+MUTED: Dict[str, str] = {
+    "brick":    "#A23B2E",   # hint
+    "teal":     "#2F7E86",   # target
+    "tan":      "#C9B68A",   # neutral / residual
+    "charcoal": "#3A3A3A",   # assassin
+    "steel":    "#6E8FA6",   # giver feature
+}
+
+# Single source of truth for colour + marker + size + legend label + ordering,
+# used for both projection markers and heatmap axis-label colours. Shapes are
+# kept varied (D / o / X / ^) so type stays distinguishable; the neutral dot is
+# small and tan so it recedes like the example's "residual" points. Grayscale
+# note: target (teal, luminance ~103) and neutral (tan, ~183) share the circle
+# shape but separate clearly by luminance; hint/assassin/giver differ by shape.
 WORD_TYPE_STYLE: Dict[str, Dict] = {
-    "hint":          {"label": "Hint",          "color": OKABE_ITO["vermillion"],   "marker": "D", "order": 5},
-    "target":        {"label": "Target",        "color": OKABE_ITO["bluish_green"], "marker": "o", "order": 4},
-    "black":         {"label": "Assassin",      "color": OKABE_ITO["black"],        "marker": "X", "order": 3},
-    "tan":           {"label": "Neutral",       "color": OKABE_ITO["orange"],       "marker": "s", "order": 1},
-    "giver_feature": {"label": "Giver feature", "color": OKABE_ITO["blue"],         "marker": "^", "order": 2},
+    "hint":          {"label": "Hint",          "color": MUTED["brick"],    "marker": "D", "size": 58, "order": 5},
+    "target":        {"label": "Target",        "color": MUTED["teal"],     "marker": "o", "size": 40, "order": 4},
+    "black":         {"label": "Assassin",      "color": MUTED["charcoal"], "marker": "X", "size": 36, "order": 3},
+    "tan":           {"label": "Neutral",       "color": MUTED["tan"],      "marker": "o", "size": 24, "order": 1},
+    "giver_feature": {"label": "Giver feature", "color": MUTED["steel"],    "marker": "^", "size": 32, "order": 2},
 }
 
 # Fallback for any unexpected word_type so the pipeline never crashes.
-_UNKNOWN_STYLE = {"label": "Other", "color": "#999999", "marker": "o", "order": 0}
+_UNKNOWN_STYLE = {"label": "Other", "color": "#999999", "marker": "o", "size": 30, "order": 0}
 
 
 def style_for(word_type: str) -> Dict:
@@ -165,12 +176,16 @@ def add_word_type_legend(fig, word_types: Sequence[str], *, y: float = 0.01,
     if not handles:
         return None
     if corner:
-        return fig.legend(
-            handles=handles, loc="upper right", bbox_to_anchor=(0.995, 0.985),
+        # Anchored just below the top row's panel titles so it sits inside the
+        # top-right panel (like the example) rather than over its title.
+        leg = fig.legend(
+            handles=handles, loc="upper right", bbox_to_anchor=(0.992, 0.90),
             ncol=1, title="Word type", title_fontsize=FS["legend_title"],
-            fontsize=FS["legend"], frameon=True, framealpha=0.92,
-            edgecolor="#cccccc", borderpad=0.6, handletextpad=0.4,
+            fontsize=FS["legend"], frameon=True, framealpha=0.85,
+            edgecolor="#e2e2e2", borderpad=0.5, handletextpad=0.4, labelspacing=0.3,
         )
+        leg.get_frame().set_linewidth(0.5)
+        return leg
     return fig.legend(
         handles=handles, loc="lower center", ncol=len(handles),
         bbox_to_anchor=(0.5, y), title="Word type",

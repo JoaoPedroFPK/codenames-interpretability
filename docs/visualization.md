@@ -93,12 +93,19 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
 Common style (`viz/style.py`, `apply_publication_style`): sans-serif (Arial →
 Helvetica → DejaVu Sans fallback), base font 8 pt, despined axes, white
 background, `savefig.dpi=300`, `pdf.fonttype=42` (editable embedded text). Word
-types use the **Okabe-Ito** colorblind-safe palette with all-distinct marker
-shapes (so type survives in grayscale): hint = vermillion diamond, target =
-bluish-green circle, assassin = black ✕, neutral = orange square, giver feature =
-blue (#0072B2) triangle. Giver-feature uses the darker blue rather than sky-blue
-so its axis-label colour does not collapse against Neutral amber in grayscale
-(luminance ~87 vs ~162); see the Task 2 grayscale/colorblind audit.
+types use a **muted, paper-like palette** matching the thesis projection example
+(`umap.png`): hint = brick `#A23B2E` diamond, target = teal `#2F7E86` circle,
+assassin = charcoal `#3A3A3A` ✕, neutral = tan `#C9B68A` small circle, giver
+feature = steel `#6E8FA6` triangle. Markers are small and per-type sized so
+neutrals recede; the palette is the single source for both projection markers and
+heatmap axis-label colours. Grayscale: target (teal, luminance ~103) and neutral
+(tan, ~183) share the circle shape but separate clearly by luminance; the other
+three differ by shape.
+
+**Giver-feature labels show the demographic VALUE, not the key.** Both figures map
+each `giver.<attr>` word to its value from the board's `giver_features` dict
+(e.g. `giver.country` → `united states`, `giver.gender` → `female`) via a
+`label_map` built in `pipeline.run`; non-giver words keep their own text.
 
 - **Heatmap** (`viz/heatmap.py`): one shared word ordering across both panels
   (type blocks then alphabetical; giver features appended last in the social

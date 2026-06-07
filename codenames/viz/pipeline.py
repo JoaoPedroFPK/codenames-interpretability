@@ -122,6 +122,15 @@ def run(
     for row_id in board_ids:
         board_dir = os.path.join(viz_dir, name, f"board_{row_id}")
 
+        # Display labels: show the giver-feature VALUE (e.g. "united states")
+        # instead of the key ("giver.country"). Built from the board's
+        # giver_features dict; non-giver words keep their own text.
+        board_meta_ws = loader.board_meta(
+            generals.get("with_social", pd.DataFrame()), row_id) \
+            or loader.board_meta(generals.get("no_social", pd.DataFrame()), row_id)
+        giver_vals = board_meta_ws.get("giver_features") or {}
+        label_map = {str(k): str(v) for k, v in giver_vals.items()}
+
         # --- Heatmap pair per representative layer ---
         for layer in sel_layers:
             panels: Dict[str, Dict] = {}
@@ -131,10 +140,9 @@ def run(
                     panels[mode] = {"words": words, "word_types": types, "vectors": vecs}
             if not panels:
                 continue
-            meta = loader.board_meta(generals.get("with_social", pd.DataFrame()), row_id) \
-                or loader.board_meta(generals.get("no_social", pd.DataFrame()), row_id)
-            title = _board_title(name, row_id, meta, suffix=f"{_SEP}layer {layer}")
-            fig, _info = heatmap.plot_heatmap_pair(panels, layer=layer, title=title)
+            title = _board_title(name, row_id, board_meta_ws, suffix=f"{_SEP}layer {layer}")
+            fig, _info = heatmap.plot_heatmap_pair(
+                panels, layer=layer, title=title, label_map=label_map)
             paths = save_figure(fig, os.path.join(board_dir, f"heatmap_L{layer:02d}"),
                                 formats=tuple(formats))
             plt.close(fig)
@@ -151,7 +159,7 @@ def run(
             method = embedding.PREFERRED_METHOD  # rendered reducer (default UMAP)
             fig, records = embedding.plot_layer_panels(
                 layer_data, num_layers=nlayers, title=title, k=k, seed=seed,
-                method=method,
+                method=method, label_map=label_map,
             )
             # Name the file after the reducer actually used, so the artefact is
             # never mislabelled if the preferred method changes.

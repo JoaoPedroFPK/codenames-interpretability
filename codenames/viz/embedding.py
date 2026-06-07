@@ -142,24 +142,25 @@ def _nearest_to_hint(vectors: np.ndarray, word_types: Sequence[str]) -> Optional
 
 
 def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
-                method_name, scores):
+                method_name, scores, label_map=None):
     """Render one projection panel with separated markers and repelled labels."""
+    lmap = label_map or {}
     import matplotlib.pyplot as plt  # noqa: F401
     try:
         from adjustText import adjust_text
     except ImportError:
         adjust_text = None
 
-    # Markers: thin white edge separates overlapping points; hint larger + dark.
+    # Markers: small, recessive (per-type size from the palette); thin white edge
+    # separates overlapping points; only the hint carries a dark edge.
     for i, wt in enumerate(word_types):
         s = style_for(wt)
         is_hint = (wt == "hint")
         ax.scatter(
-            emb[i, 0], emb[i, 1], c=s["color"], marker=s["marker"],
-            s=70 if is_hint else 46,   # hint kept modest; distinguished by shape+colour
-            edgecolors="black" if is_hint else "white",
-            linewidths=0.7 if is_hint else 0.4,
-            zorder=s["order"] + 3, alpha=0.95,
+            emb[i, 0], emb[i, 1], c=s["color"], marker=s["marker"], s=s["size"],
+            edgecolors="#333333" if is_hint else "white",
+            linewidths=0.6 if is_hint else 0.3,
+            zorder=s["order"] + 3, alpha=0.95 if is_hint else 0.9,
         )
 
     # Connector: a thin line (no arrowhead) from the hint to its nearest word in
@@ -177,9 +178,12 @@ def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
     # rest recede in light grey. Repelled off the points with thin leader lines.
     texts = []
     for i, wt in enumerate(word_types):
-        label = f"{words[i]} [T]" if wt == "target" else words[i]
-        if wt in ("hint", "target"):
-            col, weight = style_for(wt)["color"], "bold"
+        base = lmap.get(words[i], words[i])
+        label = f"{base} [T]" if wt == "target" else base
+        if wt == "hint":
+            col, weight = style_for("hint")["color"], "bold"
+        elif wt == "target":
+            col, weight = style_for("target")["color"], "normal"
         else:
             col, weight = "#9a9a9a", "normal"
         texts.append(ax.text(
@@ -211,6 +215,7 @@ def plot_layer_panels(
     seed: int = 42,
     n_cols: int = 3,
     method: str = PREFERRED_METHOD,
+    label_map: Optional[Dict[str, str]] = None,
 ) -> Tuple["object", List[Dict]]:
     """Multi-panel projection across layers for one board/condition.
 
@@ -232,7 +237,7 @@ def plot_layer_panels(
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=grid_size(n_cols, n_rows, panel_aspect=1.0,
-                          header_in=0.5, footer_in=0.3),
+                          header_in=0.25, footer_in=0.3),
         squeeze=False,
     )
 
@@ -271,6 +276,7 @@ def plot_layer_panels(
             ax, emb, words, word_types, vectors,
             layer=layer, num_layers=num_layers,
             method_name=chosen.upper(), scores=results[chosen]["scores"],
+            label_map=label_map,
         )
         for row in allr["table"]:
             records.append({"layer": layer, "selected": (row["method"] == chosen), **row})
@@ -285,7 +291,9 @@ def plot_layer_panels(
     # marks the hint's true cosine nearest-neighbour, direction-only; reducer
     # validation in dr_quality_*.csv) belongs in the LaTeX figure caption — see
     # the suggested caption in docs/visualization.md.
+    # No figure-level suptitle (matches the example): board/condition identity is
+    # carried by the filename and the LaTeX caption. `title` is accepted for API
+    # compatibility but intentionally not drawn.
     add_word_type_legend(fig, sorted(all_types_present), corner=True)
-    fig.suptitle(title, y=0.99, fontsize=FS["suptitle"], fontweight="bold")
-    fig.tight_layout(rect=(0, 0.0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0.0, 1, 0.99))
     return fig, records
