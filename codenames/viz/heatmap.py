@@ -72,6 +72,24 @@ def plot_heatmap_pair(
     apply_publication_style()
 
     modes = ["no_social", "with_social"]
+
+    # --- Single shared ordering across BOTH panels (for cell-by-cell diffing) ---
+    # Build one canonical word sequence over the union of words: type blocks
+    # (hint < target < assassin < neutral), alphabetical within, with giver
+    # features last. The shared board words therefore line up identically in both
+    # panels; the extra giver-feature rows/cols only append at the end of the
+    # with-social panel (it has them, no-social does not).
+    word_type_map: Dict[str, str] = {}
+    for mode in modes:
+        p = panels.get(mode)
+        if p:
+            for w, t in zip(p["words"], p["word_types"]):
+                word_type_map.setdefault(w, t)
+    global_order = sorted(
+        word_type_map,
+        key=lambda w: (_TYPE_ORDER.get(word_type_map[w], 99), w.lower()),
+    )
+
     prepared: Dict[str, Dict] = {}
     matrices: List[np.ndarray] = []
     for mode in modes:
@@ -79,10 +97,12 @@ def plot_heatmap_pair(
         if not p or len(p.get("words", [])) < 2:
             prepared[mode] = None
             continue
-        order = order_words(p["words"], p["word_types"])
-        words = [p["words"][i] for i in order]
-        types = [p["word_types"][i] for i in order]
-        mat = cosine_matrix(p["vectors"][order])
+        present = set(p["words"])
+        words = [w for w in global_order if w in present]
+        idx_of = {w: i for i, w in enumerate(p["words"])}
+        sel = [idx_of[w] for w in words]
+        types = [word_type_map[w] for w in words]
+        mat = cosine_matrix(p["vectors"][sel])
         prepared[mode] = {"words": words, "word_types": types, "matrix": mat}
         matrices.append(mat)
 
@@ -141,7 +161,9 @@ def plot_heatmap_pair(
     footnote(
         fig,
         "Lower triangle only (matrix is symmetric; the unit diagonal is omitted). "
-        "Colorblind-safe diverging map centred at cosine = 0.",
+        "Colorblind-safe diverging map centred at cosine = 0. Both panels share an "
+        "identical word ordering, so shared cells can be diffed directly; the "
+        "giver-feature rows/cols append only in the with-social panel.",
         y=0.11,
     )
     fig.subplots_adjust(left=0.06, right=0.9, top=0.9, bottom=0.24, wspace=0.25)

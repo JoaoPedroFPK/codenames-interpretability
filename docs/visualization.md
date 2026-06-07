@@ -60,10 +60,12 @@ against the existing pins (numpy 2.0.2, scipy 1.14.1, pandas 2.2.2 unchanged).
   masked too) — no redundant grid.
 - Colorblind-safe **diverging `RdBu_r` centred at 0**, symmetric vmin/vmax shared
   across the pair, so positive vs negative association reads directly.
-- Words ordered in type blocks (hint → target → assassin → neutral → giver
-  feature); axis labels coloured by type.
+- **Identical word ordering across both panels** (type blocks hint → target →
+  assassin → neutral, alphabetical within), so the shared board cells can be
+  diffed cell-by-cell. Axis labels coloured by type.
 - The social panel contains **all giver-feature words the board specifies**
-  (2–9; see §5).
+  (2–9; see §5); these append **only at the end** of the with-social panel, after
+  the shared board words, so the shared block stays aligned.
 
 ### Projection (`umap_{condition}_layers.{pdf,png}`)
 - Multi-panel, one panel per representative layer (≈6 spread across depth,
@@ -90,8 +92,9 @@ blue (#0072B2) triangle. Giver-feature uses the darker blue rather than sky-blue
 so its axis-label colour does not collapse against Neutral amber in grayscale
 (luminance ~87 vs ~162); see the Task 2 grayscale/colorblind audit.
 
-- **Heatmap** (`viz/heatmap.py`): words ordered in type blocks then
-  alphabetically; matrix = clipped `X̂ X̂ᵀ` on L2-normalised rows; upper triangle
+- **Heatmap** (`viz/heatmap.py`): one shared word ordering across both panels
+  (type blocks then alphabetical; giver features appended last in the social
+  panel) so cells diff directly; matrix = clipped `X̂ X̂ᵀ` on L2-normalised rows; upper triangle
   **and** diagonal masked (`np.triu(..., k=0)`); `cmap="RdBu_r"`, `center=0`, and
   **symmetric limits** `vmin=−v, vmax=+v` where `v = max(|off-diagonal|)` across
   both panels (≥0.1) so the pair is directly comparable; cells annotated when
