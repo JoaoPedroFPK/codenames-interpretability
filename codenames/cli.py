@@ -73,7 +73,10 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
     p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
     p.add_argument("--output-dir", required=True, help="Base output directory (BASE_DIR).")
     p.add_argument("--sample-size", type=int, default=None,
-                   help="Override CONTRACT_V1.sample_size for this run.")
+                   help="Override CONTRACT_V1.sample_size (default N=2000) for this run.")
+    p.add_argument("--full", action="store_true",
+                   help="Process the ENTIRE dataset (all 7704 rows), overriding "
+                        "--sample-size and the contract's N=2000 default.")
     p.add_argument("--conditions", default="no_social,with_social",
                    help="Comma-separated conditions to run (default: both).")
     p.add_argument("--skip-sanity-checks", action="store_true",
@@ -214,21 +217,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .persistence import print_output_summary
     from . import sanity as sc
 
+    import dataclasses
+
     loader = _resolve_loader(args.model)
 
-    # Build the contract for this run — override sample_size if requested.
-    if args.sample_size is not None:
-        contract = Contract(
-            sample_size=args.sample_size,
-            candidate_order=CONTRACT_V1.candidate_order,
-            pooling_methods=CONTRACT_V1.pooling_methods,
-            vector_subsample_size=CONTRACT_V1.vector_subsample_size,
-            n_shuffles=CONTRACT_V1.n_shuffles,
-            generation_max_tokens=CONTRACT_V1.generation_max_tokens,
-            shard_boards=CONTRACT_V1.shard_boards,
-            random_seed=CONTRACT_V1.random_seed,
-            max_seq_len=CONTRACT_V1.max_seq_len,
-        )
+    # Load the dataset first so --full can resolve against the real row count.
+    df = load_dataset(args.dataset)
+
+    # Resolve how many boards to run: --full > --sample-size > contract default.
+    if args.full:
+        requested_n = len(df)
+        print(f"Run size: FULL dataset ({requested_n} boards)")
+    elif args.sample_size is not None:
+        requested_n = args.sample_size
+        print(f"Run size: {requested_n} boards (--sample-size)")
+    else:
+        requested_n = CONTRACT_V1.sample_size
+        print(f"Run size: {requested_n} boards (contract default)")
+
+    # Reuse the frozen contract unless the size differs from its N=2000 baseline.
+    if requested_n != CONTRACT_V1.sample_size:
+        contract = dataclasses.replace(CONTRACT_V1, sample_size=requested_n)
     else:
         contract = CONTRACT_V1
 
@@ -245,7 +254,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         model, tokenizer, meta = loader()
 
-    df = load_dataset(args.dataset)
     df_sample = sample_turns(df, n=contract.sample_size, seed=contract.random_seed)
 
     has_generation = meta["supports_generation"] and not args.no_generation
