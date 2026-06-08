@@ -139,7 +139,7 @@ def run_extraction(
         # --- Resume reconciliation (single source of truth = the manifest) ---
         if resume:
             boards_done_resume, ckpt_idx, condition_complete = checkpoint.reconcile(
-                base_dir, prefix, mode_name)
+                base_dir, prefix, mode_name, expected_n_boards=len(df_sample))
         else:
             # Fresh run: wipe any stale checkpoints/manifest so a previous
             # aborted run cannot contaminate this one's end-of-condition concat.
@@ -213,8 +213,8 @@ def run_extraction(
                 ckpt_idx += 1
                 checkpoint.write_manifest(
                     base_dir, prefix, mode_name,
-                    boards_done=boards_done_count, ckpt_committed=ckpt_idx,
-                    complete=False)
+                    n_boards=len(df_sample), boards_done=boards_done_count,
+                    ckpt_committed=ckpt_idx, complete=False)
                 gc.collect()
 
         if acceleration.batch_size > 1:
@@ -596,7 +596,8 @@ def run_extraction(
         # finishes, below.
         checkpoint.write_manifest(
             base_dir, prefix, mode_name,
-            boards_done=len(df_sample), ckpt_committed=ckpt_idx, complete=True)
+            n_boards=len(df_sample), boards_done=len(df_sample),
+            ckpt_committed=ckpt_idx, complete=True)
         checkpoint.remove_ckpts(base_dir, prefix, mode_name)
 
         del vector_records_all, general_records, generation_records

@@ -210,6 +210,49 @@ The output schema is documented in `docs/contract.md`. The synthesis
 notebook that consumes these outputs to produce the figures in the
 thesis Results chapter is maintained separately from this repository.
 
+### Resuming an interrupted run
+
+A full-dataset run of a 7B model takes hours, and a Colab runtime can die
+mid-run. The `run` subcommand checkpoints incrementally so a dead run can be
+continued instead of restarted:
+
+```bash
+# First attempt (or after a runtime death, just re-run with --resume):
+codenames-experiment run \
+    --model mistral \
+    --dataset /content/drive/MyDrive/TCC/clue_generation.csv \
+    --output-dir /content/drive/MyDrive/TCC/mistral_outputs \
+    --full --resume
+```
+
+How it works:
+
+- Every `shard_boards` boards (Contract default 200), all output streams
+  (metrics, general, generation, vectors, errors) are flushed to atomic
+  checkpoint files in `--output-dir`, and a per-condition manifest
+  (`{prefix}_{mode}_manifest.json`) records the committed board prefix.
+- With `--resume`, the run skips boards already committed and reuses a
+  condition that already finished, continuing from the last checkpoint. The
+  result is **byte-identical** to an uninterrupted run: board sampling, shuffle
+  seeds, and the vector subsample are all re-derived deterministically from the
+  contract, independent of where the run was interrupted.
+- Without `--resume`, any stale checkpoints/manifests in `--output-dir` are
+  wiped before the run, so a fresh run is never contaminated by a previous
+  aborted one. A successfully completed run removes all checkpoint and manifest
+  files, leaving exactly the documented output files.
+
+Checkpoints live in `--output-dir` (i.e. in Drive), so they survive the runtime
+dying. Because flushes are batched (every `shard_boards` boards) rather than
+per-board, the extra Drive I/O is negligible.
+
+`--resume` continues a run of the **same** size: it is tied to the
+`--sample-size`/`--full` the run was started with (the manifest records it). If
+you point `--resume` at a directory whose checkpoints came from a different run
+size, the run aborts with a clear error rather than risk mixing boards — re-run
+without `--resume` (which wipes and starts fresh), or use the matching size.
+(Reusing a smaller run's per-board results when scaling up to the full dataset
+is a separate, planned feature and is not what `--resume` does.)
+
 ### Validating against existing runs
 
 The `notebooks/00_validation.ipynb` notebook runs the refactored

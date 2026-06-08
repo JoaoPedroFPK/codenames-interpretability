@@ -170,9 +170,11 @@ def read_manifest(base_dir: str, prefix: str, mode: str) -> Optional[dict]:
 
 
 def write_manifest(base_dir: str, prefix: str, mode: str, *,
-                   boards_done: int, ckpt_committed: int, complete: bool) -> str:
+                   n_boards: int, boards_done: int, ckpt_committed: int,
+                   complete: bool) -> str:
     path = manifest_path(base_dir, prefix, mode)
     obj = {
+        "n_boards": int(n_boards),
         "boards_done": int(boards_done),
         "ckpt_committed": int(ckpt_committed),
         "complete": bool(complete),
@@ -186,6 +188,11 @@ def write_manifest(base_dir: str, prefix: str, mode: str, *,
     return path
 
 
+class ResumeSizeMismatch(RuntimeError):
+    """Raised when a --resume target's manifest was written for a different
+    run size than the current run, which would mix non-corresponding boards."""
+
+
 def remove_manifest(base_dir: str, prefix: str, mode: str) -> None:
     path = manifest_path(base_dir, prefix, mode)
     for q in (path, path + ".tmp"):
@@ -193,7 +200,8 @@ def remove_manifest(base_dir: str, prefix: str, mode: str) -> None:
             os.remove(q)
 
 
-def reconcile(base_dir: str, prefix: str, mode: str) -> Tuple[int, int, bool]:
+def reconcile(base_dir: str, prefix: str, mode: str,
+              expected_n_boards: int) -> Tuple[int, int, bool]:
     """Bring the checkpoint dir into a consistent, resumable state.
 
     Returns ``(boards_done, ckpt_committed, complete)``:
@@ -204,12 +212,25 @@ def reconcile(base_dir: str, prefix: str, mode: str) -> Tuple[int, int, bool]:
     * Manifest present → delete orphan checkpoints with ``idx >=
       ckpt_committed`` (written but not committed) and all ``.tmp`` files,
       then report the committed state to resume from.
+
+    Raises :class:`ResumeSizeMismatch` if the manifest was written for a
+    different run size than ``expected_n_boards`` — resuming across run sizes
+    would skip the wrong (non-corresponding) boards, since ``df_sample``
+    membership and order depend on the sample size.
     """
     m = read_manifest(base_dir, prefix, mode)
     if m is None:
         remove_ckpts(base_dir, prefix, mode)
         remove_tmp(base_dir, prefix, mode)
         return 0, 0, False
+
+    manifest_n = int(m.get("n_boards", -1))
+    if manifest_n != int(expected_n_boards):
+        raise ResumeSizeMismatch(
+            f"--resume target '{base_dir}' has a {mode} manifest for "
+            f"n_boards={manifest_n}, but this run has n_boards={expected_n_boards}. "
+            f"Re-run without --resume to start fresh, or use the matching run size."
+        )
 
     committed = int(m["ckpt_committed"])
     for stream in ("metrics",) + RECORD_STREAMS:

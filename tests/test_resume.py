@@ -192,6 +192,27 @@ def test_resume_matches_uninterrupted(scenario, tmp_path, monkeypatch):
     assert digest_dir(str(crash_dir)) == ref_digest
 
 
+def test_resume_refuses_size_mismatch(tmp_path, monkeypatch):
+    """Resuming a directory whose manifest was written for a different run size
+    aborts (rather than skipping non-corresponding boards)."""
+    from codenames.checkpoint import ResumeSizeMismatch
+
+    d = str(tmp_path / "out")
+    os.makedirs(d)
+
+    # Leave an interrupted run of size 7 (crash after one committed flush).
+    _install_bomb(monkeypatch, bomb_after=10)
+    with pytest.raises(KeyboardInterrupt):
+        H.run_harness(d, sample_size=7, has_generation=False, use_truncation=True,
+                      batch_size=1, resume=False, monkeypatch=monkeypatch)
+
+    # Resuming with a different size must refuse.
+    H.install_fakes(monkeypatch)
+    with pytest.raises(ResumeSizeMismatch):
+        H.run_harness(d, sample_size=5, has_generation=False, use_truncation=True,
+                      batch_size=1, resume=True, monkeypatch=monkeypatch)
+
+
 @pytest.mark.parametrize("flag,expected", [(["--resume"], True), ([], False)])
 def test_cli_threads_resume_flag(flag, expected, tmp_path, monkeypatch):
     """The ``run`` subcommand parses ``--resume`` and forwards it verbatim."""
