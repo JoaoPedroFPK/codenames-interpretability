@@ -17,11 +17,8 @@ import numpy as np
 from . import metrics as _m
 from .style import (
     FS,
-    add_word_type_legend,
     apply_publication_style,
     depth_label,
-    grid_size,
-    style_for,
 )
 
 METHODS = ("umap", "tsne", "pca")
@@ -31,6 +28,64 @@ METHODS = ("umap", "tsne", "pca")
 # are still fit and scored per panel for the dr_quality_*.csv audit, so the
 # trustworthiness of the rendered UMAP layout can always be checked.
 PREFERRED_METHOD = "umap"
+
+# === Reference aesthetic (distance_map_2d_*.png) =========================
+# Warm paper background, serif type, visible light-grey spines + ticks,
+# saturated category colours, hint -> target arrows, framed corner legend and
+# an italic disclaimer footnote. This deliberately diverges from the house
+# sans-serif style in style.py; it is applied ONLY to the projection figure
+# (via rc_context in plot_layer_panels) so the heatmap is unaffected.
+_BG_COLOR = "#FAFAF8"
+_SPINE_COLOR = "#CCCCCC"
+_LEADER_COLOR = "#999999"
+_FOOTNOTE_COLOR = "#888888"
+
+_REF_COLOR = {
+    "hint":          "#C0392B",
+    "target":        "#1A6B5A",
+    "black":         "#1C1C1C",
+    "tan":           "#C8A86B",
+    "giver_feature": "#6E8FA6",
+}
+_REF_MARKER = {
+    "hint": "D", "target": "^", "black": "X", "tan": "s", "giver_feature": "P",
+}
+_REF_SIZE = {
+    "hint": 140, "target": 100, "black": 60, "tan": 55, "giver_feature": 70,
+}
+_REF_ALPHA = {
+    "hint": 1.0, "target": 1.0, "black": 0.8, "tan": 0.7, "giver_feature": 0.9,
+}
+_REF_LEGEND_LABEL = {
+    "hint": "Hint", "target": "Target [T]", "black": "Assassin",
+    "tan": "Neutral", "giver_feature": "Giver feature",
+}
+# Legend / z-order priority (drawn high to low), matching the reference.
+_REF_ORDER = ["hint", "target", "black", "tan", "giver_feature"]
+
+# In-panel font sizes (pt at the reference render size).
+_REF_FS = {"title": 10, "axis": 8, "tick": 7, "label": 8, "suptitle": 12,
+           "legend": 8, "footnote": 7}
+
+_REF_DISCLAIMER = (
+    "Coordinates produced by UMAP projection (n_components=2, metric=cosine, "
+    "random_state=42). No quantitative metric is derived from projected "
+    "coordinates; all reported results use the original high-dimensional space."
+)
+
+_REF_RC = {
+    "font.family": "serif",
+    "font.serif": ["DejaVu Serif", "serif"],
+    "figure.facecolor": _BG_COLOR,
+    "axes.facecolor": _BG_COLOR,
+    "savefig.facecolor": _BG_COLOR,
+    "axes.spines.top": True,
+    "axes.spines.right": True,
+}
+
+
+def _ref_color(wt: str) -> str:
+    return _REF_COLOR.get(wt, _LEADER_COLOR)
 
 
 def _normalize(X: np.ndarray) -> np.ndarray:
@@ -128,87 +183,105 @@ def best_embedding(
             "combined": b["combined"], "table": allr["table"]}
 
 
-def _nearest_to_hint(vectors: np.ndarray, word_types: Sequence[str]) -> Optional[int]:
-    """Index of the word closest (max cosine) to the hint, excluding the hint."""
-    hint_idx = [i for i, t in enumerate(word_types) if t == "hint"]
-    if not hint_idx:
-        return None
-    h = hint_idx[0]
-    Xn = _normalize(vectors)
-    sims = Xn @ Xn[h]
-    sims[h] = -np.inf
-    j = int(np.argmax(sims))
-    return j if np.isfinite(sims[j]) else None
-
-
 def _draw_panel(ax, emb, words, word_types, vectors, *, layer, num_layers,
                 method_name, scores, label_map=None):
-    """Render one projection panel with separated markers and repelled labels."""
+    """Render one projection panel in the reference aesthetic.
+
+    Saturated category markers, an arrow from the hint to each target, every
+    word labelled (hint/target bold), repelled off the points with thin leader
+    lines, and visible light-grey spines + numeric ticks.
+    """
     lmap = label_map or {}
-    import matplotlib.pyplot as plt  # noqa: F401
     try:
         from adjustText import adjust_text
     except ImportError:
         adjust_text = None
 
-    # Markers: small, recessive (per-type size from the palette); thin white edge
-    # separates overlapping points; only the hint carries a dark edge.
+    ax.set_facecolor(_BG_COLOR)
+
+    # Markers: per-type colour/shape/size; white edge on hint and assassin so
+    # they read against neighbours and in grayscale print.
+    hint_idx = None
+    target_indices = []
     for i, wt in enumerate(word_types):
-        s = style_for(wt)
-        is_hint = (wt == "hint")
+        edged = wt in ("hint", "black")
         ax.scatter(
-            emb[i, 0], emb[i, 1], c=s["color"], marker=s["marker"], s=s["size"],
-            edgecolors="#333333" if is_hint else "white",
-            linewidths=0.6 if is_hint else 0.3,
-            zorder=s["order"] + 3, alpha=0.95 if is_hint else 0.9,
+            emb[i, 0], emb[i, 1], c=_ref_color(wt),
+            marker=_REF_MARKER.get(wt, "o"), s=_REF_SIZE.get(wt, 40),
+            alpha=_REF_ALPHA.get(wt, 0.9),
+            edgecolors="white" if edged else "none",
+            linewidths=0.8 if edged else 0.5, zorder=3,
         )
+        if wt == "hint":
+            hint_idx = i
+        elif wt == "target":
+            target_indices.append(i)
 
-    # Connector: a thin line (no arrowhead) from the hint to its nearest word in
-    # cosine space, drawn under the markers — matches the projection example.
-    j = _nearest_to_hint(vectors, word_types)
-    hint_idx = [i for i, t in enumerate(word_types) if t == "hint"]
-    if j is not None and hint_idx:
-        h = hint_idx[0]
-        ax.plot(
-            [emb[h, 0], emb[j, 0]], [emb[h, 1], emb[j, 1]],
-            color="#4f8a9c", lw=0.8, alpha=0.75, zorder=2, solid_capstyle="round",
-        )
+    # Arrows from the hint to each target — teal, with an arrowhead, drawn under
+    # the markers (matches the reference figure).
+    if hint_idx is not None:
+        hx, hy = emb[hint_idx]
+        for ti in target_indices:
+            tx, ty = emb[ti]
+            ax.annotate(
+                "", xy=(tx, ty), xytext=(hx, hy),
+                arrowprops=dict(arrowstyle="-|>", color=_REF_COLOR["target"],
+                                lw=1.5, alpha=0.7, mutation_scale=12),
+                zorder=2,
+            )
 
-    # Labels: only the semantically important words (hint, target, assassin,
-    # giver feature) are labelled; neutral "residual" words stay as unlabelled
-    # dots — this matches the example and keeps dense boards legible. Repelled
-    # off the points with thin leader lines.
-    _LABEL_STYLE = {
-        "hint":          (style_for("hint")["color"], "bold"),
-        "target":        (style_for("target")["color"], "normal"),
-        "giver_feature": (style_for("giver_feature")["color"], "normal"),
-        "black":         ("#666666", "normal"),
-    }
+    # Labels: every word; hint and target bold; target tagged "[T]".
     texts = []
     for i, wt in enumerate(word_types):
-        if wt not in _LABEL_STYLE:
-            continue
         base = lmap.get(words[i], words[i])
         label = f"{base} [T]" if wt == "target" else base
-        col, weight = _LABEL_STYLE[wt]
+        weight = "bold" if wt in ("hint", "target") else "normal"
         texts.append(ax.text(
-            emb[i, 0], emb[i, 1], label, fontsize=FS["word_label"], color=col,
-            fontweight=weight, zorder=11,
+            emb[i, 0], emb[i, 1], label, fontsize=_REF_FS["label"],
+            fontweight=weight, color=_ref_color(wt), zorder=5,
         ))
     if adjust_text is not None and texts:
         adjust_text(
             texts, ax=ax,
-            arrowprops=dict(arrowstyle="-", color="#d0d0d0", lw=0.3),
-            expand=(1.15, 1.3), force_text=(0.4, 0.6),
-            only_move={"text": "xy", "static": "xy", "explode": "xy", "pull": "xy"},
+            arrowprops=dict(arrowstyle="-", lw=0.4, color=_LEADER_COLOR),
+            expand=(1.3, 1.5), force_text=(0.5, 0.8),
         )
 
     ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
-                 fontsize=FS["panel_title"], fontweight="bold")
-    ax.set_xlabel(f"{method_name} 1", fontsize=FS["axis_label"])
-    ax.set_ylabel(f"{method_name} 2", fontsize=FS["axis_label"])
-    ax.set_xticks([]); ax.set_yticks([])
+                 fontsize=_REF_FS["title"], fontweight="bold")
+    ax.set_xlabel(f"{method_name} 1", fontsize=_REF_FS["axis"])
+    ax.set_ylabel(f"{method_name} 2", fontsize=_REF_FS["axis"])
+    for spine in ax.spines.values():
+        spine.set_color(_SPINE_COLOR)
+    ax.tick_params(colors=_SPINE_COLOR, labelsize=_REF_FS["tick"])
     ax.margins(0.16)
+
+
+def _ref_legend(fig, present_types):
+    """Compact framed corner legend in the reference aesthetic."""
+    from matplotlib.lines import Line2D
+
+    handles = []
+    for wt in _REF_ORDER:
+        if wt not in present_types:
+            continue
+        edged = wt in ("hint", "black")
+        handles.append(Line2D(
+            [0], [0], marker=_REF_MARKER[wt], color="w",
+            markerfacecolor=_REF_COLOR[wt], markersize=9 if wt == "hint" else 8,
+            label=_REF_LEGEND_LABEL[wt],
+            markeredgecolor="white" if edged else _REF_COLOR[wt],
+            markeredgewidth=0.8 if edged else 0.0, linestyle="none",
+        ))
+    if not handles:
+        return None
+    leg = fig.legend(
+        handles=handles, loc="upper right", bbox_to_anchor=(0.99, 0.93),
+        fontsize=_REF_FS["legend"], framealpha=0.9, edgecolor=_SPINE_COLOR,
+        frameon=True,
+    )
+    leg.get_frame().set_linewidth(0.6)
+    return leg
 
 
 def plot_layer_panels(
@@ -234,71 +307,78 @@ def plot_layer_panels(
     """
     import matplotlib.pyplot as plt
 
+    # House defaults (DPI, export settings) — then the reference overrides
+    # (serif, paper background, visible spines/ticks) are applied via rc_context
+    # so they are scoped to THIS figure only and never leak to the heatmap.
     apply_publication_style()
 
     n = len(layer_data)
     n_cols = min(n_cols, max(1, n))
     n_rows = int(np.ceil(n / n_cols))
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=grid_size(n_cols, n_rows, panel_aspect=1.0, width_in=8.6,
-                          header_in=0.3, footer_in=0.35),
-        squeeze=False,
-    )
+
+    # A larger canvas (≈5 in panels) so every word label breathes, matching the
+    # reference figure's proportions rather than the compact thesis-width grid.
+    panel_w, panel_h = 5.0, 4.4
+    figsize = (n_cols * panel_w, n_rows * panel_h + 1.4)
 
     records: List[Dict] = []
     all_types_present: set = set()
 
-    for panel_i, ld in enumerate(layer_data):
-        r, c = divmod(panel_i, n_cols)
-        ax = axes[r][c]
-        layer = int(ld["layer"])
-        words = ld["words"]
-        word_types = ld["word_types"]
-        vectors = ld["vectors"]
-        all_types_present.update(word_types)
+    with plt.rc_context(_REF_RC):
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
 
-        if vectors.shape[0] < 3:
-            ax.text(0.5, 0.5, "too few words", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=FS["annot"], color="grey")
-            ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
-                         fontsize=FS["panel_title"], fontweight="bold")
-            ax.set_xticks([]); ax.set_yticks([])
-            continue
+        for panel_i, ld in enumerate(layer_data):
+            r, c = divmod(panel_i, n_cols)
+            ax = axes[r][c]
+            layer = int(ld["layer"])
+            words = ld["words"]
+            word_types = ld["word_types"]
+            vectors = ld["vectors"]
+            all_types_present.update(word_types)
 
-        allr = embed_all(vectors, k=k, seed=seed)
-        results = allr["results"]
-        chosen = method if method in results else (
-            max(results, key=lambda m: results[m]["combined"]) if results else None)
-        if chosen is None:
-            ax.text(0.5, 0.5, "reduction failed", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=FS["annot"], color="grey")
-            ax.set_xticks([]); ax.set_yticks([])
-            continue
+            if vectors.shape[0] < 3:
+                ax.text(0.5, 0.5, "too few words", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=_REF_FS["axis"],
+                        color="grey")
+                ax.set_title(f"Layer {layer} — {depth_label(layer, num_layers)}",
+                             fontsize=_REF_FS["title"], fontweight="bold")
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
 
-        emb = np.asarray(results[chosen]["embedding"])
-        _draw_panel(
-            ax, emb, words, word_types, vectors,
-            layer=layer, num_layers=num_layers,
-            method_name=chosen.upper(), scores=results[chosen]["scores"],
-            label_map=label_map,
-        )
-        for row in allr["table"]:
-            records.append({"layer": layer, "selected": (row["method"] == chosen), **row})
+            allr = embed_all(vectors, k=k, seed=seed)
+            results = allr["results"]
+            chosen = method if method in results else (
+                max(results, key=lambda m: results[m]["combined"]) if results else None)
+            if chosen is None:
+                ax.text(0.5, 0.5, "reduction failed", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=_REF_FS["axis"],
+                        color="grey")
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
 
-    # Blank any unused panels.
-    for panel_i in range(n, n_rows * n_cols):
-        r, c = divmod(panel_i, n_cols)
-        axes[r][c].axis("off")
+            emb = np.asarray(results[chosen]["embedding"])
+            _draw_panel(
+                ax, emb, words, word_types, vectors,
+                layer=layer, num_layers=num_layers,
+                method_name=chosen.upper(), scores=results[chosen]["scores"],
+                label_map=label_map,
+            )
+            for row in allr["table"]:
+                records.append({"layer": layer, "selected": (row["method"] == chosen), **row})
 
-    # Compact framed legend in the top-right corner (matches the example). No
-    # on-figure footnote: the explanatory text (even-depth layers; the connector
-    # marks the hint's true cosine nearest-neighbour, direction-only; reducer
-    # validation in dr_quality_*.csv) belongs in the LaTeX figure caption — see
-    # the suggested caption in docs/visualization.md.
-    # No figure-level suptitle (matches the example): board/condition identity is
-    # carried by the filename and the LaTeX caption. `title` is accepted for API
-    # compatibility but intentionally not drawn.
-    add_word_type_legend(fig, sorted(all_types_present), corner=True)
-    fig.tight_layout(rect=(0, 0.0, 1, 0.99))
+        # Blank any unused panels.
+        for panel_i in range(n, n_rows * n_cols):
+            r, c = divmod(panel_i, n_cols)
+            axes[r][c].axis("off")
+
+        # Bold suptitle (board/condition identity), framed corner legend and an
+        # italic disclaimer footnote — all per the reference figure.
+        if title:
+            fig.suptitle(title, fontsize=_REF_FS["suptitle"], fontweight="bold",
+                         y=0.99)
+        _ref_legend(fig, all_types_present)
+        fig.text(0.5, 0.012, _REF_DISCLAIMER, ha="center", fontsize=_REF_FS["footnote"],
+                 fontstyle="italic", color=_FOOTNOTE_COLOR, wrap=True)
+        fig.tight_layout(rect=(0, 0.04, 1, 0.96))
+
     return fig, records

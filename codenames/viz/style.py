@@ -242,9 +242,12 @@ def save_figure(
     Filenames are deterministic (caller supplies the stem).
     """
     os.makedirs(os.path.dirname(os.path.abspath(path_base)), exist_ok=True)
+    # Preserve each figure's own background (white for the house style, warm
+    # paper for the reference-styled projection) rather than forcing white.
+    facecolor = fig.get_facecolor()
     written: List[str] = []
     for ext in formats:
         out = f"{path_base}.{ext}"
-        fig.savefig(out, dpi=dpi, facecolor="white")
+        fig.savefig(out, dpi=dpi, facecolor=facecolor)
         written.append(out)
     return written
