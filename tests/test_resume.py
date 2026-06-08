@@ -120,3 +120,73 @@ def test_matches_golden(scenario, tmp_path, monkeypatch):
         pytest.skip("REGEN_GOLDEN set; golden regeneration handled separately")
     assert scenario in golden, f"scenario {scenario} missing from golden"
     assert dig == golden[scenario]
+
+
+def _install_bomb(monkeypatch, bomb_after):
+    """Install fakes that raise KeyboardInterrupt after ``bomb_after`` calls.
+
+    KeyboardInterrupt is a BaseException, so it escapes the loop's per-board
+    ``except Exception`` and propagates out of ``run_extraction`` — a faithful
+    stand-in for a runtime being killed mid-board (data in unflushed buffers is
+    lost, committed checkpoints remain).
+    """
+    import codenames.loop as loop
+    state = {"n": 0}
+
+    def _bomb(fn):
+        def wrapped(**kw):
+            state["n"] += 1
+            if state["n"] >= bomb_after:
+                raise KeyboardInterrupt(f"simulated crash at call {state['n']}")
+            return fn(**kw)
+        return wrapped
+
+    monkeypatch.setattr(loop, "run_instance", _bomb(H.fake_run_instance))
+    monkeypatch.setattr(loop, "run_instance_batched", _bomb(H.fake_run_instance_batched))
+    return state
+
+
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_resume_matches_uninterrupted(scenario, tmp_path, monkeypatch):
+    """P1: a run killed (repeatedly) and resumed is byte-identical to an
+    uninterrupted run, and resume makes monotonic progress each attempt."""
+    opts = SCENARIOS[scenario]
+
+    # --- Reference: one clean, uninterrupted run. ---
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    ref_digest = run_scenario(scenario, str(ref_dir), monkeypatch)
+
+    # --- Crash/resume: bomb after a fixed number of NEW calls each attempt,
+    # which exceeds the calls-to-first-flush so every attempt commits at least
+    # one checkpoint (guaranteed forward progress), until a final clean pass. ---
+    crash_dir = tmp_path / "crash"
+    crash_dir.mkdir()
+
+    attempts = 0
+    crashed = 0
+    completed = False
+    while attempts < 30:
+        attempts += 1
+        resume = attempts > 1
+        if attempts <= 6:
+            # Early attempts crash mid-run (bomb_after=10 > 9 calls-to-first
+            # -flush in the per-board path, so progress is always committed).
+            _install_bomb(monkeypatch, bomb_after=10)
+            try:
+                H.run_harness(str(crash_dir), resume=resume, monkeypatch=monkeypatch, **opts)
+                completed = True
+                break
+            except KeyboardInterrupt:
+                crashed += 1
+                continue
+        else:
+            # Later attempts run clean to guarantee termination.
+            H.install_fakes(monkeypatch)
+            H.run_harness(str(crash_dir), resume=True, monkeypatch=monkeypatch, **opts)
+            completed = True
+            break
+
+    assert completed, f"run never completed after {attempts} attempts"
+    assert crashed >= 1, "test did not actually exercise a crash/resume cycle"
+    assert digest_dir(str(crash_dir)) == ref_digest

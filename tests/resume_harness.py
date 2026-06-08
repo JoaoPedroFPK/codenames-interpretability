@@ -280,6 +280,7 @@ def run_harness(
     has_generation: bool,
     use_truncation: bool,
     batch_size: int = 1,
+    resume: bool = False,
     monkeypatch=None,
 ) -> Dict:
     """Run ``run_extraction`` with the fakes installed, into ``base_dir``.
@@ -311,4 +312,5 @@ def run_harness(
         has_generation=has_generation,
         generation_fn=fake_generation_fn if has_generation else None,
         acceleration=accel,
+        resume=resume,
     )

@@ -28,19 +28,23 @@ them to equal objects, so ``pd.DataFrame(load_records(...))`` equals
 ``pd.DataFrame(in_memory_records)``.
 """
 
+import json
 import os
 import pickle
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
-# Streams that are checkpointed as pickled raw-record lists.
-RECORD_STREAMS = ("general", "generation", "vectors")
+# Streams that are checkpointed as pickled raw-record lists. ``errors`` is
+# included so the per-condition error log survives a crash and resumes
+# byte-identically alongside the data streams.
+RECORD_STREAMS = ("general", "generation", "vectors", "errors")
 # The metrics stream is checkpointed as parquet shards.
 METRICS_STREAM = "metrics"
 
-_EXT = {"metrics": "parquet", "general": "pkl", "generation": "pkl", "vectors": "pkl"}
+_EXT = {"metrics": "parquet", "general": "pkl", "generation": "pkl",
+        "vectors": "pkl", "errors": "pkl"}
 
 
 def ckpt_path(base_dir: str, prefix: str, stream: str, mode: str, idx: int) -> str:
@@ -141,3 +145,76 @@ def remove_tmp(base_dir: str, prefix: str, mode: str,
         for name in os.listdir(base_dir):
             if name.startswith(f"{prefix}{suffix}") and name.endswith(f".{ext}.tmp"):
                 os.remove(os.path.join(base_dir, name))
+
+
+# ---------------------------------------------------------------------------
+# Manifest — the single source of truth for what has been committed.
+#
+# Written *after* a flush's checkpoint files are on disk (data-first,
+# manifest-second), so a crash between the two leaves only orphan checkpoints
+# with ``idx >= ckpt_committed`` that ``reconcile`` discards. The manifest is
+# retained only while a run is incomplete; a clean run deletes it at the end,
+# leaving the output directory byte-identical to a non-resumable run.
+# ---------------------------------------------------------------------------
+
+def manifest_path(base_dir: str, prefix: str, mode: str) -> str:
+    return os.path.join(base_dir, f"{prefix}_{mode}_manifest.json")
+
+
+def read_manifest(base_dir: str, prefix: str, mode: str) -> Optional[dict]:
+    path = manifest_path(base_dir, prefix, mode)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def write_manifest(base_dir: str, prefix: str, mode: str, *,
+                   boards_done: int, ckpt_committed: int, complete: bool) -> str:
+    path = manifest_path(base_dir, prefix, mode)
+    obj = {
+        "boards_done": int(boards_done),
+        "ckpt_committed": int(ckpt_committed),
+        "complete": bool(complete),
+    }
+
+    def _w(tmp):
+        with open(tmp, "w") as f:
+            json.dump(obj, f, sort_keys=True)
+
+    _atomic_write(path, _w)
+    return path
+
+
+def remove_manifest(base_dir: str, prefix: str, mode: str) -> None:
+    path = manifest_path(base_dir, prefix, mode)
+    for q in (path, path + ".tmp"):
+        if os.path.exists(q):
+            os.remove(q)
+
+
+def reconcile(base_dir: str, prefix: str, mode: str) -> Tuple[int, int, bool]:
+    """Bring the checkpoint dir into a consistent, resumable state.
+
+    Returns ``(boards_done, ckpt_committed, complete)``:
+
+    * No manifest → the checkpoints cannot be trusted (a crash before the
+      first commit, or leftovers from an aborted non-resumable run). Wipe all
+      checkpoints + ``.tmp`` and report a fresh start ``(0, 0, False)``.
+    * Manifest present → delete orphan checkpoints with ``idx >=
+      ckpt_committed`` (written but not committed) and all ``.tmp`` files,
+      then report the committed state to resume from.
+    """
+    m = read_manifest(base_dir, prefix, mode)
+    if m is None:
+        remove_ckpts(base_dir, prefix, mode)
+        remove_tmp(base_dir, prefix, mode)
+        return 0, 0, False
+
+    committed = int(m["ckpt_committed"])
+    for stream in ("metrics",) + RECORD_STREAMS:
+        for idx, path in list_ckpts(base_dir, prefix, stream, mode):
+            if idx >= committed and os.path.exists(path):
+                os.remove(path)
+    remove_tmp(base_dir, prefix, mode)
+    return int(m["boards_done"]), committed, bool(m["complete"])

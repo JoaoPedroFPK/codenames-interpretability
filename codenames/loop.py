@@ -37,6 +37,28 @@ from .persistence import (
 from .prompts import build_prompt
 
 
+def _load_condition_outputs(base_dir: str, prefix: str, mode_name: str) -> Dict:
+    """Reload a completed condition's final outputs from disk into a results dict.
+
+    Used on resume when the manifest reports a condition is already complete:
+    its checkpoints are gone, but the final CSV/parquet files remain and the
+    downstream sanity checks expect the same in-memory shape ``run_extraction``
+    would have returned.
+    """
+    gpath = os.path.join(base_dir, f"{prefix}_general_{mode_name}.csv")
+    mpath = os.path.join(base_dir, f"{prefix}_metrics_{mode_name}.parquet")
+    genpath = os.path.join(base_dir, f"{prefix}_generation_{mode_name}.csv")
+    epath = os.path.join(base_dir, f"{prefix}_errors_{mode_name}.csv")
+    return {
+        "general_df": pd.read_csv(gpath) if os.path.exists(gpath) else pd.DataFrame(),
+        "metrics_df": pd.read_parquet(mpath) if os.path.exists(mpath) else pd.DataFrame(),
+        "generation_df": pd.read_csv(genpath) if os.path.exists(genpath) else pd.DataFrame(),
+        "error_log": (
+            pd.read_csv(epath).to_dict("records") if os.path.exists(epath) else []
+        ),
+    }
+
+
 def run_extraction(
     *,
     model,
@@ -54,8 +76,17 @@ def run_extraction(
     has_generation: bool = False,
     generation_fn: Optional[Callable] = None,
     acceleration: Acceleration = ACCEL_REFERENCE,
+    resume: bool = False,
 ) -> Dict[str, Dict]:
     """Run the full extraction for both conditions, saving outputs to ``base_dir``.
+
+    When ``resume`` is True, an interrupted run in ``base_dir`` is continued:
+    already-committed boards (per the per-condition manifest) are skipped and a
+    fully-completed condition's outputs are loaded from disk. ``shuffle_seeds``
+    and the vector subsample are re-derived identically from the contract, and
+    skipped boards keep their original ``board_idx``, so a resumed run is
+    byte-identical to an uninterrupted one. With ``resume=False`` (default) any
+    stale checkpoints/manifest in ``base_dir`` are wiped before the run.
 
     Returns a dict keyed by condition name (``no_social`` / ``with_social``)
     with sub-dicts containing ``general_df``, ``metrics_df``, ``generation_df``,
@@ -105,9 +136,30 @@ def run_extraction(
               f"(canonical + {n_shuffles} shuffles per board)")
         print(f"{'='*60}")
 
-        # These four lists are flush-and-clear *buffers*: the loop appends to
-        # them and ``_flush_checkpoint`` periodically writes their contents to
-        # atomic checkpoint files and empties them, so each stream survives a
+        # --- Resume reconciliation (single source of truth = the manifest) ---
+        if resume:
+            boards_done_resume, ckpt_idx, condition_complete = checkpoint.reconcile(
+                base_dir, prefix, mode_name)
+        else:
+            # Fresh run: wipe any stale checkpoints/manifest so a previous
+            # aborted run cannot contaminate this one's end-of-condition concat.
+            checkpoint.remove_ckpts(base_dir, prefix, mode_name)
+            checkpoint.remove_manifest(base_dir, prefix, mode_name)
+            boards_done_resume, ckpt_idx, condition_complete = 0, 0, False
+
+        if condition_complete:
+            print(f"  [resume] condition '{mode_name}' already complete; "
+                  f"loading existing outputs.")
+            results[mode_name] = _load_condition_outputs(base_dir, prefix, mode_name)
+            continue
+
+        if resume and boards_done_resume > 0:
+            print(f"  [resume] skipping first {boards_done_resume} "
+                  f"already-committed boards; continuing at checkpoint {ckpt_idx}.")
+
+        # These lists are flush-and-clear *buffers*: the loop appends to them
+        # and ``_flush_checkpoint`` periodically writes their contents to atomic
+        # checkpoint files and empties them, so each stream survives a
         # mid-condition crash. At end of condition the full ordered lists are
         # reconstructed from the checkpoints (see assembly block below).
         general_records = []
@@ -117,21 +169,20 @@ def run_extraction(
         error_log = []
 
         # --- Checkpoint tracking: one monotonic index per flush boundary,
-        # shared across all four streams (see codenames/checkpoint.py). ---
-        ckpt_idx = 0
+        # shared across all streams. ``ckpt_idx`` is seeded from the manifest
+        # on resume so new checkpoints continue the existing sequence. ---
         boards_in_shard = 0
 
-        def _flush_checkpoint():
+        def _flush_checkpoint(boards_done_count):
             """Flush every non-empty stream buffer to an atomic checkpoint.
 
-            Bumps the shared checkpoint index iff anything was written. This is
-            the original inline metrics shard flush, widened from metrics-only
-            to all four streams. Metrics keep their parquet-shard form (so the
-            end-of-condition concat is byte-identical); general/generation/
-            vectors are pickled raw-record lists.
+            Writes all stream checkpoints at the current index, bumps the shared
+            index, then (data-first, manifest-second) records the committed
+            state in the manifest. ``boards_done_count`` is the absolute number
+            of boards processed so far — the contiguous prefix a resume skips.
             """
             nonlocal ckpt_idx, metrics_buffer, general_records
-            nonlocal generation_records, vector_records_all
+            nonlocal generation_records, vector_records_all, error_log
             wrote = False
             if metrics_buffer:
                 checkpoint.write_metrics_shard(
@@ -153,8 +204,17 @@ def run_extraction(
                     vector_records_all, base_dir, prefix, "vectors", mode_name, ckpt_idx)
                 vector_records_all = []
                 wrote = True
+            if error_log:
+                checkpoint.write_records(
+                    error_log, base_dir, prefix, "errors", mode_name, ckpt_idx)
+                error_log = []
+                wrote = True
             if wrote:
                 ckpt_idx += 1
+                checkpoint.write_manifest(
+                    base_dir, prefix, mode_name,
+                    boards_done=boards_done_count, ckpt_committed=ckpt_idx,
+                    complete=False)
                 gc.collect()
 
         if acceleration.batch_size > 1:
@@ -171,6 +231,11 @@ def run_extraction(
                 range(0, n_boards, acceleration.batch_size),
                 desc=f"{mode_name} (batched)",
             ):
+                # Resume: skip whole chunks already committed. ``boards_done_resume``
+                # always lands on a chunk boundary (flushes happen at chunk ends),
+                # so this skips exactly the committed prefix.
+                if chunk_start < boards_done_resume:
+                    continue
                 chunk_end = min(chunk_start + acceleration.batch_size, n_boards)
                 chunk_rows = rows_list[chunk_start:chunk_end]
                 chunk_indices = list(range(chunk_start, chunk_end))
@@ -319,7 +384,7 @@ def run_extraction(
                 # Shard flush check — increment per board in the chunk.
                 boards_in_shard += len(chunk_rows)
                 if boards_in_shard >= shard_boards and metrics_buffer:
-                    _flush_checkpoint()
+                    _flush_checkpoint(chunk_end)
                     boards_in_shard = 0
 
         else:
@@ -327,6 +392,11 @@ def run_extraction(
             for board_idx, (_, row) in enumerate(
                 tqdm(df_sample.iterrows(), total=len(df_sample), desc=mode_name)
             ):
+                # Resume: skip the already-committed contiguous prefix. The
+                # original board_idx is preserved so shuffle_seeds[board_idx]
+                # stays bit-identical for the boards we do process.
+                if board_idx < boards_done_resume:
+                    continue
                 row_id = int(row["row_id"])
                 canonical_candidates = list(row["candidates"])  # alphabetical
 
@@ -440,11 +510,11 @@ def run_extraction(
                 # --- Shard flush check (INLINE) ---
                 boards_in_shard += 1
                 if boards_in_shard >= shard_boards and metrics_buffer:
-                    _flush_checkpoint()
+                    _flush_checkpoint(board_idx + 1)
                     boards_in_shard = 0
 
-        # --- Final flush of any remaining buffers (all four streams) ---
-        _flush_checkpoint()
+        # --- Final flush of any remaining buffers (all five streams) ---
+        _flush_checkpoint(len(df_sample))
 
         # ------------------------------------------------------------------
         # Concatenate metrics shards into a single parquet file
@@ -498,7 +568,9 @@ def run_extraction(
             save_generation_csv(generation_df, base_dir, prefix, mode_name)
 
         # Persist error log per mode so post-hoc debugging doesn't depend on
-        # the in-memory results dict surviving the session.
+        # the in-memory results dict surviving the session. Reconstructed from
+        # checkpoints so resumed runs carry the full error history.
+        error_log = checkpoint.load_records(base_dir, prefix, "errors", mode_name)
         save_error_log(error_log, base_dir, prefix, mode_name)
 
         print(f"\nCondition '{mode_name}' complete.")
@@ -517,8 +589,14 @@ def run_extraction(
             "error_log"     : error_log,
         }
 
-        # All final outputs for this condition are now on disk; the
-        # checkpoints have served their purpose and can be removed.
+        # All final outputs for this condition are on disk. Mark the manifest
+        # complete (so a resume after a crash in the *next* condition knows to
+        # load these rather than recompute) and drop the now-redundant
+        # checkpoints. The manifest itself is removed only once the whole run
+        # finishes, below.
+        checkpoint.write_manifest(
+            base_dir, prefix, mode_name,
+            boards_done=len(df_sample), ckpt_committed=ckpt_idx, complete=True)
         checkpoint.remove_ckpts(base_dir, prefix, mode_name)
 
         del vector_records_all, general_records, generation_records
@@ -526,6 +604,11 @@ def run_extraction(
         gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
+
+    # The whole run is complete: remove the manifests so the output directory
+    # is byte-identical to a non-resumable run (no checkpoint/manifest debris).
+    for mode_name in ("no_social", "with_social"):
+        checkpoint.remove_manifest(base_dir, prefix, mode_name)
 
     print(f"\nBoth conditions complete. Outputs in: {base_dir}")
     return results
