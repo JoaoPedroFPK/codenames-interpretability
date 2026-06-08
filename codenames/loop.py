@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from . import checkpoint
 from .contract import ACCEL_REFERENCE, Acceleration, Contract
 from .data import GIVER_COLS, extract_giver_features
 from .extraction import run_instance, run_instance_batched
@@ -104,16 +105,57 @@ def run_extraction(
               f"(canonical + {n_shuffles} shuffles per board)")
         print(f"{'='*60}")
 
+        # These four lists are flush-and-clear *buffers*: the loop appends to
+        # them and ``_flush_checkpoint`` periodically writes their contents to
+        # atomic checkpoint files and empties them, so each stream survives a
+        # mid-condition crash. At end of condition the full ordered lists are
+        # reconstructed from the checkpoints (see assembly block below).
         general_records = []
         metrics_buffer = []
         vector_records_all = []
         generation_records = []
         error_log = []
 
-        # --- Stream A shard tracking (inline; no helper function) ---
-        shard_idx = 0
+        # --- Checkpoint tracking: one monotonic index per flush boundary,
+        # shared across all four streams (see codenames/checkpoint.py). ---
+        ckpt_idx = 0
         boards_in_shard = 0
-        shard_paths = []
+
+        def _flush_checkpoint():
+            """Flush every non-empty stream buffer to an atomic checkpoint.
+
+            Bumps the shared checkpoint index iff anything was written. This is
+            the original inline metrics shard flush, widened from metrics-only
+            to all four streams. Metrics keep their parquet-shard form (so the
+            end-of-condition concat is byte-identical); general/generation/
+            vectors are pickled raw-record lists.
+            """
+            nonlocal ckpt_idx, metrics_buffer, general_records
+            nonlocal generation_records, vector_records_all
+            wrote = False
+            if metrics_buffer:
+                checkpoint.write_metrics_shard(
+                    pd.DataFrame(metrics_buffer), base_dir, prefix, mode_name, ckpt_idx)
+                metrics_buffer = []
+                wrote = True
+            if general_records:
+                checkpoint.write_records(
+                    general_records, base_dir, prefix, "general", mode_name, ckpt_idx)
+                general_records = []
+                wrote = True
+            if generation_records:
+                checkpoint.write_records(
+                    generation_records, base_dir, prefix, "generation", mode_name, ckpt_idx)
+                generation_records = []
+                wrote = True
+            if vector_records_all:
+                checkpoint.write_records(
+                    vector_records_all, base_dir, prefix, "vectors", mode_name, ckpt_idx)
+                vector_records_all = []
+                wrote = True
+            if wrote:
+                ckpt_idx += 1
+                gc.collect()
 
         if acceleration.batch_size > 1:
             # --- Batched code path (acceleration.batch_size > 1) ---
@@ -277,16 +319,8 @@ def run_extraction(
                 # Shard flush check — increment per board in the chunk.
                 boards_in_shard += len(chunk_rows)
                 if boards_in_shard >= shard_boards and metrics_buffer:
-                    shard_path = os.path.join(
-                        base_dir,
-                        f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
-                    )
-                    pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
-                    shard_paths.append(shard_path)
-                    metrics_buffer = []
-                    shard_idx += 1
+                    _flush_checkpoint()
                     boards_in_shard = 0
-                    gc.collect()
 
         else:
             # --- Reference per-board code path (acceleration.batch_size == 1) ---
@@ -406,40 +440,23 @@ def run_extraction(
                 # --- Shard flush check (INLINE) ---
                 boards_in_shard += 1
                 if boards_in_shard >= shard_boards and metrics_buffer:
-                    shard_path = os.path.join(
-                        base_dir,
-                        f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
-                    )
-                    pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
-                    shard_paths.append(shard_path)
-                    metrics_buffer = []
-                    shard_idx += 1
+                    _flush_checkpoint()
                     boards_in_shard = 0
-                    gc.collect()
 
-        # --- Final flush of remaining buffer (INLINE) ---
-        if metrics_buffer:
-            shard_path = os.path.join(
-                base_dir,
-                f"{prefix}_metrics_{mode_name}_shard{shard_idx:03d}.parquet",
-            )
-            pd.DataFrame(metrics_buffer).to_parquet(shard_path, index=False)
-            shard_paths.append(shard_path)
-            metrics_buffer = []
-            shard_idx += 1
-            gc.collect()
+        # --- Final flush of any remaining buffers (all four streams) ---
+        _flush_checkpoint()
 
         # ------------------------------------------------------------------
-        # Concatenate shards into a single parquet file
+        # Concatenate metrics shards into a single parquet file
         # ------------------------------------------------------------------
+        # Read the parquet shards back in index (= board) order and concat,
+        # exactly as the pre-checkpoint code did with its in-run shard list.
         metrics_path = os.path.join(base_dir, f"{prefix}_metrics_{mode_name}.parquet")
-        if shard_paths:
-            all_shards = [pd.read_parquet(p) for p in shard_paths]
-            metrics_df = pd.concat(all_shards, ignore_index=True)
+        metric_frames = checkpoint.load_metrics_frames(base_dir, prefix, mode_name)
+        if metric_frames:
+            metrics_df = pd.concat(metric_frames, ignore_index=True)
             metrics_df.to_parquet(metrics_path, index=False)
-            for p in shard_paths:
-                os.remove(p)
-            del all_shards
+            del metric_frames
             gc.collect()
             metrics_mb = os.path.getsize(metrics_path) / 1e6
         else:
@@ -449,6 +466,9 @@ def run_extraction(
         # ------------------------------------------------------------------
         # Save Stream B: Vector subsample
         # ------------------------------------------------------------------
+        # Reconstruct the full ordered vector-record list from checkpoints and
+        # hand it to the unchanged persistence helper (byte-identical output).
+        vector_records_all = checkpoint.load_records(base_dir, prefix, "vectors", mode_name)
         n_vec_records = len(vector_records_all)
         vec_mb = 0.0
         if n_vec_records > 0:
@@ -464,9 +484,15 @@ def run_extraction(
         # ------------------------------------------------------------------
         # Save General + Generation
         # ------------------------------------------------------------------
+        # Reconstruct the full ordered record lists from checkpoints, then
+        # build the DataFrame and save exactly as before — building one
+        # DataFrame from the complete dict list reproduces the original dtype
+        # inference, so the CSV is byte-identical.
+        general_records = checkpoint.load_records(base_dir, prefix, "general", mode_name)
         general_df = pd.DataFrame(general_records)
         save_general_csv(general_df, base_dir, prefix, mode_name)
 
+        generation_records = checkpoint.load_records(base_dir, prefix, "generation", mode_name)
         generation_df = pd.DataFrame(generation_records)
         if has_generation and len(generation_df) > 0:
             save_generation_csv(generation_df, base_dir, prefix, mode_name)
@@ -490,6 +516,10 @@ def run_extraction(
             "generation_df" : generation_df,
             "error_log"     : error_log,
         }
+
+        # All final outputs for this condition are now on disk; the
+        # checkpoints have served their purpose and can be removed.
+        checkpoint.remove_ckpts(base_dir, prefix, mode_name)
 
         del vector_records_all, general_records, generation_records
         vector_records_all = []  # reset for next condition
