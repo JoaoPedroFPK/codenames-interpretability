@@ -250,8 +250,45 @@ per-board, the extra Drive I/O is negligible.
 you point `--resume` at a directory whose checkpoints came from a different run
 size, the run aborts with a clear error rather than risk mixing boards — re-run
 without `--resume` (which wipes and starts fresh), or use the matching size.
-(Reusing a smaller run's per-board results when scaling up to the full dataset
-is a separate, planned feature and is not what `--resume` does.)
+
+### Reusing canonical results across run sizes
+
+`--reuse-canonical` enables cross-size reuse: a later, larger run reuses the
+per-board **canonical** (`permutation_id=0`) metrics, general, and generation
+results computed by an earlier, smaller run, for the boards they share — instead
+of recomputing those forward passes.
+
+```bash
+# 1. Explore on 1000 boards, populating the cache:
+codenames-experiment run --model mistral --dataset .../clue_generation.csv \
+    --output-dir .../mistral_outputs --sample-size 1000 --reuse-canonical
+
+# 2. Later scale to the full dataset, reusing the shared boards' canonicals:
+codenames-experiment run --model mistral --dataset .../clue_generation.csv \
+    --output-dir .../mistral_outputs --full --reuse-canonical
+```
+
+How it works and what it guarantees:
+
+- The canonical records are cached per condition in `--output-dir`, keyed by
+  `row_id` (`{prefix}_canoncache_*` files). The cache is **persistent** (it is
+  not deleted between runs) and only grows.
+- When a board's `row_id` is in the cache, its canonical forward pass is
+  skipped and the cached records are reused. **Shuffle permutations are always
+  recomputed** for the current run (their seeds are sample-size-dependent), and
+  boards in the vector subsample are never reused (they need a fresh pass to
+  produce vectors). The output is therefore **byte-identical** to a run computed
+  without the cache — reuse only skips work, it never changes results.
+- Pass `--reuse-canonical` on **both** runs: the earlier run writes the cache,
+  the later run reads it (and adds its own new boards).
+- Reuse is **disabled under `--batch-size > 1`** (batched canonical values
+  depend on which boards are padded together, so they are not interchangeable
+  with the reference path); such runs neither read nor write the cache.
+- `--reuse-canonical` composes with `--resume`: a run can both continue from its
+  own checkpoints and reuse canonicals cached from a different-size run.
+
+Because the cache duplicates the canonical third of the metrics, it uses extra
+Drive space; only enable it when you intend to reuse across sizes.
 
 ### Validating against existing runs
 
