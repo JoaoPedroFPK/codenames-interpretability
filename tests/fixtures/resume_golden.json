@@ -1,0 +1,46 @@
+{
+  "causal_b1": {
+    "fake_general_no_social.csv": "raw:7c5bc8552e81fd8731e3bc19abddfc11850d00d9a031dc7eb9dd5a0ba217a273",
+    "fake_general_with_social.csv": "raw:19709a11926ad645dd8e873b0fd74eb6529a55419f5f002c5d6b53c8b6dc681c",
+    "fake_generation_no_social.csv": "raw:a9acda249e6dff21a59a8a1a3b00c75e061230c079dd46bff5bb54ca88f2b6e1",
+    "fake_generation_with_social.csv": "raw:cc05b26b30e72f3caf6c743260e2dc80876fd79f43e79783dc45c89e511a4a5d",
+    "fake_metrics_no_social.parquet": "parquet:ba3f475bce062da49fb5b679782fd140c914c99fa613aa60b5eb6fd8fe15f45c",
+    "fake_metrics_with_social.parquet": "parquet:424c0f5929c70de000d904013715d7167d8faaa4eeddd660cb12652dbda9f7eb",
+    "fake_vectors_subsample_index_no_social.csv": "raw:aa1365d17ea333c7f6a0455b51f14be3a3f5a9d97614dff9d743f310aea2d2eb",
+    "fake_vectors_subsample_index_with_social.csv": "raw:ccb0fa94b5db5fb1d5fa22451e370b8a5bc933f48452010328e0ffad41360006",
+    "fake_vectors_subsample_no_social_f16.npz": "npz:af4c891bc9945b1d827a77acb96810820159ef2cafd7c9f00234035080f175a6",
+    "fake_vectors_subsample_with_social_f16.npz": "npz:af4c891bc9945b1d827a77acb96810820159ef2cafd7c9f00234035080f175a6"
+  },
+  "causal_b3": {
+    "fake_general_no_social.csv": "raw:4a3660f3a60eac102037163965d0f319680c3054414fd042a32ba33e5f442adf",
+    "fake_general_with_social.csv": "raw:de6102f2302b7b7771e09338c418e0137c03b010c455ee6a50882457da8b8ad1",
+    "fake_generation_no_social.csv": "raw:e4c7fdf16728dd24bb5b8a53319b9fd0e64818745be47e7576faaa4d601f0ebb",
+    "fake_generation_with_social.csv": "raw:567049f85b00a6aa10c447671e01530c4ebd5c9a341f6b5cb9c1227453885b13",
+    "fake_metrics_no_social.parquet": "parquet:f629abb9d96845e4053c0db479efb7e182291badd612f183c3bde836d6420b3a",
+    "fake_metrics_with_social.parquet": "parquet:ef9286c26d87f46547354addc0d7cf2612b594f6f9392c5c1b19b649754ff619",
+    "fake_vectors_subsample_index_no_social.csv": "raw:f35e4fed738261e74b7da0d0593bb9ff1df6e79aeab5a7eb5ca96a2e9c2810eb",
+    "fake_vectors_subsample_index_with_social.csv": "raw:a28daaa173ff91989241e307787e595bd48aed67b6a9a44f225592e5e5bbe39f",
+    "fake_vectors_subsample_no_social_f16.npz": "npz:f2a27cf522acd9898ce6f1792e267c6c45639c80fadd6696ed8caa30109b4d87",
+    "fake_vectors_subsample_with_social_f16.npz": "npz:f2a27cf522acd9898ce6f1792e267c6c45639c80fadd6696ed8caa30109b4d87"
+  },
+  "encoder_b1": {
+    "fake_general_no_social.csv": "raw:c67f49ead497a1b74beed1aaca5a42869c6931de4d825c6b3f0be3dda16de39c",
+    "fake_general_with_social.csv": "raw:022af427fad40e5bb74b3b7f01c4672ba5c211a62791962c42a356c306263352",
+    "fake_metrics_no_social.parquet": "parquet:ba3f475bce062da49fb5b679782fd140c914c99fa613aa60b5eb6fd8fe15f45c",
+    "fake_metrics_with_social.parquet": "parquet:424c0f5929c70de000d904013715d7167d8faaa4eeddd660cb12652dbda9f7eb",
+    "fake_vectors_subsample_index_no_social.csv": "raw:aa1365d17ea333c7f6a0455b51f14be3a3f5a9d97614dff9d743f310aea2d2eb",
+    "fake_vectors_subsample_index_with_social.csv": "raw:ccb0fa94b5db5fb1d5fa22451e370b8a5bc933f48452010328e0ffad41360006",
+    "fake_vectors_subsample_no_social_f16.npz": "npz:af4c891bc9945b1d827a77acb96810820159ef2cafd7c9f00234035080f175a6",
+    "fake_vectors_subsample_with_social_f16.npz": "npz:af4c891bc9945b1d827a77acb96810820159ef2cafd7c9f00234035080f175a6"
+  },
+  "encoder_b3": {
+    "fake_general_no_social.csv": "raw:5175c9c459b56da772536ed5cad8662b3129c0a7eebe2476c38df4695d7ef624",
+    "fake_general_with_social.csv": "raw:23c8b5038382fc0018e65bf1d9a8cbba07a18762e737080787b291a3838c0184",
+    "fake_metrics_no_social.parquet": "parquet:f629abb9d96845e4053c0db479efb7e182291badd612f183c3bde836d6420b3a",
+    "fake_metrics_with_social.parquet": "parquet:ef9286c26d87f46547354addc0d7cf2612b594f6f9392c5c1b19b649754ff619",
+    "fake_vectors_subsample_index_no_social.csv": "raw:f35e4fed738261e74b7da0d0593bb9ff1df6e79aeab5a7eb5ca96a2e9c2810eb",
+    "fake_vectors_subsample_index_with_social.csv": "raw:a28daaa173ff91989241e307787e595bd48aed67b6a9a44f225592e5e5bbe39f",
+    "fake_vectors_subsample_no_social_f16.npz": "npz:f2a27cf522acd9898ce6f1792e267c6c45639c80fadd6696ed8caa30109b4d87",
+    "fake_vectors_subsample_with_social_f16.npz": "npz:f2a27cf522acd9898ce6f1792e267c6c45639c80fadd6696ed8caa30109b4d87"
+  }
+}
