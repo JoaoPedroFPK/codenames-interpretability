@@ -229,8 +229,11 @@ How it works:
 
 - Every `shard_boards` boards (Contract default 200), all output streams
   (metrics, general, generation, vectors, errors) are flushed to atomic
-  checkpoint files in `--output-dir`, and a per-condition manifest
-  (`{prefix}_{mode}_manifest.json`) records the committed board prefix.
+  checkpoint files in a **separate checkpoint directory**, and a per-condition
+  manifest (`{prefix}_{mode}_manifest.json`) records the committed board prefix.
+  `--output-dir` therefore holds only the final result files; the intermediate
+  checkpoints (and the reuse cache, if enabled) live in `--checkpoint-dir`,
+  which defaults to a `checkpoints/` subfolder of `--output-dir`.
 - With `--resume`, the run skips boards already committed and reuses a
   condition that already finished, continuing from the last checkpoint. The
   result is **byte-identical** to an uninterrupted run: board sampling, shuffle
@@ -241,9 +244,11 @@ How it works:
   aborted one. A successfully completed run removes all checkpoint and manifest
   files, leaving exactly the documented output files.
 
-Checkpoints live in `--output-dir` (i.e. in Drive), so they survive the runtime
+Checkpoints live in `--checkpoint-dir` (in Drive), so they survive the runtime
 dying. Because flushes are batched (every `shard_boards` boards) rather than
-per-board, the extra Drive I/O is negligible.
+per-board, the extra Drive I/O is negligible. The model notebooks set
+`CHECKPOINT_DIR` to a sibling `{prefix}_checkpoints/` folder, keeping
+`{prefix}_outputs/` limited to the final result files.
 
 `--resume` continues a run of the **same** size: it is tied to the
 `--sample-size`/`--full` the run was started with (the manifest records it). If

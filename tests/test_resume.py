@@ -253,6 +253,33 @@ def test_cli_threads_resume_flag(flags, exp_resume, exp_reuse, tmp_path, monkeyp
     assert rc == 0
     assert captured.get("resume") is exp_resume
     assert captured.get("reuse_canonical") is exp_reuse
+    assert captured.get("checkpoint_dir") is None  # not passed -> default subfolder
+
+
+def test_cli_threads_checkpoint_dir(tmp_path, monkeypatch):
+    """The run subcommand forwards --checkpoint-dir to run_extraction."""
+    import codenames.cli as cli
+    import codenames.data as data
+    import codenames.loop as loop
+    import codenames.persistence as persistence
+
+    meta = {"prefix": "fake", "chat_template_strategy": "raw",
+            "forward_hidden_states_mode": "encoder_load_time", "use_truncation": True,
+            "num_layers": 2, "hidden_dim": 4, "device": "cpu", "supports_generation": False}
+    monkeypatch.setattr(cli, "_resolve_loader", lambda name: (lambda **kw: (None, None, meta)))
+    monkeypatch.setattr(data, "load_dataset", lambda path: H.make_fake_dataset(3))
+    monkeypatch.setattr(data, "sample_turns", lambda df, n, seed: df)
+    monkeypatch.setattr(persistence, "print_output_summary", lambda **kw: None)
+    captured = {}
+    monkeypatch.setattr(loop, "run_extraction", lambda **kw: captured.update(kw) or {})
+
+    rc = cli.main([
+        "run", "--model", "bert", "--dataset", "x.csv",
+        "--output-dir", str(tmp_path / "out"), "--checkpoint-dir", str(tmp_path / "ck"),
+        "--sample-size", "3", "--skip-sanity-checks",
+    ])
+    assert rc == 0
+    assert captured.get("checkpoint_dir") == str(tmp_path / "ck")
 
 
 # ===========================================================================
@@ -328,7 +355,12 @@ def test_cross_size_canonical_reuse(has_gen, trunc, tmp_path, monkeypatch):
     os.makedirs(cache_dir)
     H.install_fakes(monkeypatch)
     H.run_harness(cache_dir, reuse_canonical=True, monkeypatch=monkeypatch, **small)
-    assert any("canoncache" in f for f in os.listdir(cache_dir)), "cache not written"
+    # The cache lives in the separate checkpoints/ subfolder, not base_dir.
+    ckpt_sub = os.path.join(cache_dir, "checkpoints")
+    assert os.path.isdir(ckpt_sub), "checkpoint dir not created"
+    assert any("canoncache" in f for f in os.listdir(ckpt_sub)), "cache not written"
+    assert not any("canoncache" in f for f in os.listdir(cache_dir)), \
+        "cache leaked into base_dir"
 
     # 2. Reference: large run, no reuse, fresh dir.
     ref_dir = str(tmp_path / "ref")
@@ -346,6 +378,32 @@ def test_cross_size_canonical_reuse(has_gen, trunc, tmp_path, monkeypatch):
 
     assert reuse_digest == ref_digest, "reuse changed the output"
     assert reuse_calls < ref_calls, "reuse did not skip any forward passes"
+
+
+def test_checkpoints_separate_from_outputs(tmp_path, monkeypatch):
+    """Final outputs land in base_dir; checkpoint/manifest infra lives only in
+    the separate checkpoint dir, mid-run and after completion."""
+    opts = dict(sample_size=7, has_generation=True, use_truncation=False, batch_size=1)
+    base = str(tmp_path / "out")
+    ckpt = str(tmp_path / "ckpts")
+    os.makedirs(base)
+
+    # Crash mid-run, then inspect: checkpoints must be in `ckpt`, not `base`.
+    _install_bomb(monkeypatch, bomb_after=10)
+    with pytest.raises(KeyboardInterrupt):
+        H.run_harness(base, monkeypatch=monkeypatch, checkpoint_dir=ckpt, **opts)
+    assert os.path.isdir(ckpt) and os.listdir(ckpt), "no checkpoints in checkpoint dir"
+    assert any("ckpt" in f or "manifest" in f for f in os.listdir(ckpt))
+    assert not any("ckpt" in f or "manifest" in f for f in os.listdir(base)), \
+        "checkpoint/manifest leaked into base_dir"
+
+    # Finish via resume; final outputs in base_dir, base_dir has no infra files.
+    H.install_fakes(monkeypatch)
+    H.run_harness(base, resume=True, monkeypatch=monkeypatch, checkpoint_dir=ckpt, **opts)
+    base_files = os.listdir(base)
+    assert any(f.endswith(".parquet") for f in base_files)  # metrics output present
+    assert not any(("ckpt" in f) or ("manifest" in f) for f in base_files), \
+        "infra files in base_dir after completion"
 
 
 def test_reuse_disabled_under_batching(tmp_path, monkeypatch):

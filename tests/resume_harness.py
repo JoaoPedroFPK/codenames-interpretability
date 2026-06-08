@@ -282,6 +282,7 @@ def run_harness(
     batch_size: int = 1,
     resume: bool = False,
     reuse_canonical: bool = False,
+    checkpoint_dir: str = None,
     monkeypatch=None,
 ) -> Dict:
     """Run ``run_extraction`` with the fakes installed, into ``base_dir``.
@@ -315,4 +316,5 @@ def run_harness(
         acceleration=accel,
         resume=resume,
         reuse_canonical=reuse_canonical,
+        checkpoint_dir=checkpoint_dir,
     )

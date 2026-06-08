@@ -71,7 +71,12 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
     )
     p.add_argument("--model", required=True, choices=list(MODEL_REGISTRY))
     p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
-    p.add_argument("--output-dir", required=True, help="Base output directory (BASE_DIR).")
+    p.add_argument("--output-dir", required=True,
+                   help="Base output directory (BASE_DIR) for the final result files only.")
+    p.add_argument("--checkpoint-dir", default=None,
+                   help="Directory for intermediate checkpoint/manifest files and the "
+                        "canonical reuse cache. Keeps --output-dir limited to the final "
+                        "outputs. Defaults to a 'checkpoints' subfolder of --output-dir.")
     p.add_argument("--sample-size", type=int, default=None,
                    help="Override CONTRACT_V1.sample_size (default N=2000) for this run.")
     p.add_argument("--full", action="store_true",
@@ -327,6 +332,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         acceleration=acceleration,
         resume=args.resume,
         reuse_canonical=args.reuse_canonical,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
     if not args.skip_sanity_checks:

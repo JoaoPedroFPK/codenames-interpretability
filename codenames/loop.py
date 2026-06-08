@@ -79,6 +79,7 @@ def run_extraction(
     acceleration: Acceleration = ACCEL_REFERENCE,
     resume: bool = False,
     reuse_canonical: bool = False,
+    checkpoint_dir: Optional[str] = None,
 ) -> Dict[str, Dict]:
     """Run the full extraction for both conditions, saving outputs to ``base_dir``.
 
@@ -140,6 +141,13 @@ def run_extraction(
 
     os.makedirs(base_dir, exist_ok=True)
 
+    # Final outputs live in ``base_dir``; intermediate checkpoint/manifest files
+    # and the (persistent) canonical reuse cache live in ``ckpt_dir``, which is
+    # a separate folder so ``base_dir`` holds only the documented outputs.
+    # Defaults to a ``checkpoints`` subfolder of ``base_dir``.
+    ckpt_dir = checkpoint_dir or os.path.join(base_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
     results: Dict[str, Dict] = {}
 
     for mode_flag in experiment_modes:
@@ -158,12 +166,12 @@ def run_extraction(
         # --- Resume reconciliation (single source of truth = the manifest) ---
         if resume:
             boards_done_resume, ckpt_idx, condition_complete = checkpoint.reconcile(
-                base_dir, prefix, mode_name, expected_n_boards=len(df_sample))
+                ckpt_dir, prefix, mode_name, expected_n_boards=len(df_sample))
         else:
             # Fresh run: wipe any stale checkpoints/manifest so a previous
             # aborted run cannot contaminate this one's end-of-condition concat.
-            checkpoint.remove_ckpts(base_dir, prefix, mode_name)
-            checkpoint.remove_manifest(base_dir, prefix, mode_name)
+            checkpoint.remove_ckpts(ckpt_dir, prefix, mode_name)
+            checkpoint.remove_manifest(ckpt_dir, prefix, mode_name)
             boards_done_resume, ckpt_idx, condition_complete = 0, 0, False
 
         if condition_complete:
@@ -178,7 +186,7 @@ def run_extraction(
 
         # Load the canonical cache for read-through reuse (batch_size==1 only).
         canon_cache_obj = (
-            canon_cache.load(base_dir, prefix, mode_name) if reuse_effective else None
+            canon_cache.load(ckpt_dir, prefix, mode_name) if reuse_effective else None
         )
         reused_canonical = 0
         if canon_cache_obj is not None and len(canon_cache_obj):
@@ -214,33 +222,33 @@ def run_extraction(
             wrote = False
             if metrics_buffer:
                 checkpoint.write_metrics_shard(
-                    pd.DataFrame(metrics_buffer), base_dir, prefix, mode_name, ckpt_idx)
+                    pd.DataFrame(metrics_buffer), ckpt_dir, prefix, mode_name, ckpt_idx)
                 metrics_buffer = []
                 wrote = True
             if general_records:
                 checkpoint.write_records(
-                    general_records, base_dir, prefix, "general", mode_name, ckpt_idx)
+                    general_records, ckpt_dir, prefix, "general", mode_name, ckpt_idx)
                 general_records = []
                 wrote = True
             if generation_records:
                 checkpoint.write_records(
-                    generation_records, base_dir, prefix, "generation", mode_name, ckpt_idx)
+                    generation_records, ckpt_dir, prefix, "generation", mode_name, ckpt_idx)
                 generation_records = []
                 wrote = True
             if vector_records_all:
                 checkpoint.write_records(
-                    vector_records_all, base_dir, prefix, "vectors", mode_name, ckpt_idx)
+                    vector_records_all, ckpt_dir, prefix, "vectors", mode_name, ckpt_idx)
                 vector_records_all = []
                 wrote = True
             if error_log:
                 checkpoint.write_records(
-                    error_log, base_dir, prefix, "errors", mode_name, ckpt_idx)
+                    error_log, ckpt_dir, prefix, "errors", mode_name, ckpt_idx)
                 error_log = []
                 wrote = True
             if wrote:
                 ckpt_idx += 1
                 checkpoint.write_manifest(
-                    base_dir, prefix, mode_name,
+                    ckpt_dir, prefix, mode_name,
                     n_boards=len(df_sample), boards_done=boards_done_count,
                     ckpt_committed=ckpt_idx, complete=False)
                 gc.collect()
@@ -566,7 +574,7 @@ def run_extraction(
         # Read the parquet shards back in index (= board) order and concat,
         # exactly as the pre-checkpoint code did with its in-run shard list.
         metrics_path = os.path.join(base_dir, f"{prefix}_metrics_{mode_name}.parquet")
-        metric_frames = checkpoint.load_metrics_frames(base_dir, prefix, mode_name)
+        metric_frames = checkpoint.load_metrics_frames(ckpt_dir, prefix, mode_name)
         if metric_frames:
             metrics_df = pd.concat(metric_frames, ignore_index=True)
             metrics_df.to_parquet(metrics_path, index=False)
@@ -582,7 +590,7 @@ def run_extraction(
         # ------------------------------------------------------------------
         # Reconstruct the full ordered vector-record list from checkpoints and
         # hand it to the unchanged persistence helper (byte-identical output).
-        vector_records_all = checkpoint.load_records(base_dir, prefix, "vectors", mode_name)
+        vector_records_all = checkpoint.load_records(ckpt_dir, prefix, "vectors", mode_name)
         n_vec_records = len(vector_records_all)
         vec_mb = 0.0
         if n_vec_records > 0:
@@ -602,11 +610,11 @@ def run_extraction(
         # build the DataFrame and save exactly as before — building one
         # DataFrame from the complete dict list reproduces the original dtype
         # inference, so the CSV is byte-identical.
-        general_records = checkpoint.load_records(base_dir, prefix, "general", mode_name)
+        general_records = checkpoint.load_records(ckpt_dir, prefix, "general", mode_name)
         general_df = pd.DataFrame(general_records)
         save_general_csv(general_df, base_dir, prefix, mode_name)
 
-        generation_records = checkpoint.load_records(base_dir, prefix, "generation", mode_name)
+        generation_records = checkpoint.load_records(ckpt_dir, prefix, "generation", mode_name)
         generation_df = pd.DataFrame(generation_records)
         if has_generation and len(generation_df) > 0:
             save_generation_csv(generation_df, base_dir, prefix, mode_name)
@@ -614,7 +622,7 @@ def run_extraction(
         # Persist error log per mode so post-hoc debugging doesn't depend on
         # the in-memory results dict surviving the session. Reconstructed from
         # checkpoints so resumed runs carry the full error history.
-        error_log = checkpoint.load_records(base_dir, prefix, "errors", mode_name)
+        error_log = checkpoint.load_records(ckpt_dir, prefix, "errors", mode_name)
         save_error_log(error_log, base_dir, prefix, mode_name)
 
         print(f"\nCondition '{mode_name}' complete.")
@@ -641,7 +649,7 @@ def run_extraction(
         # intact), and idempotent — already-cached row_ids are skipped.
         if reuse_effective:
             n_added = canon_cache.update(
-                base_dir, prefix, mode_name,
+                ckpt_dir, prefix, mode_name,
                 general_df=general_df, metrics_df=metrics_df,
                 generation_df=generation_df,
             )
@@ -653,10 +661,10 @@ def run_extraction(
         # checkpoints. The manifest itself is removed only once the whole run
         # finishes, below.
         checkpoint.write_manifest(
-            base_dir, prefix, mode_name,
+            ckpt_dir, prefix, mode_name,
             n_boards=len(df_sample), boards_done=len(df_sample),
             ckpt_committed=ckpt_idx, complete=True)
-        checkpoint.remove_ckpts(base_dir, prefix, mode_name)
+        checkpoint.remove_ckpts(ckpt_dir, prefix, mode_name)
 
         del vector_records_all, general_records, generation_records
         vector_records_all = []  # reset for next condition
@@ -664,10 +672,19 @@ def run_extraction(
         if device == "cuda":
             torch.cuda.empty_cache()
 
-    # The whole run is complete: remove the manifests so the output directory
-    # is byte-identical to a non-resumable run (no checkpoint/manifest debris).
+    # The whole run is complete: remove the manifests so the checkpoint dir holds
+    # nothing but the (persistent) reuse cache, if any. base_dir holds only the
+    # documented outputs throughout.
     for mode_name in ("no_social", "with_social"):
-        checkpoint.remove_manifest(base_dir, prefix, mode_name)
+        checkpoint.remove_manifest(ckpt_dir, prefix, mode_name)
+
+    # Tidy: drop the checkpoint dir if it ended up empty (no cache written and
+    # it was the auto-created default), so a clean run leaves no empty folder.
+    try:
+        if not os.listdir(ckpt_dir):
+            os.rmdir(ckpt_dir)
+    except OSError:
+        pass
 
     print(f"\nBoth conditions complete. Outputs in: {base_dir}")
     return results
