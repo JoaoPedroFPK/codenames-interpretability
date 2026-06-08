@@ -83,6 +83,11 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
                    help="Skip SC1-SC7 after extraction.")
     p.add_argument("--no-generation", action="store_true",
                    help="Disable generation phase for causal models (no effect on encoders).")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume an interrupted run in --output-dir: skip boards already "
+                        "committed to checkpoints (per the manifest) and reuse a completed "
+                        "condition's outputs. Byte-identical to an uninterrupted run. "
+                        "Without this flag, stale checkpoints in --output-dir are wiped.")
     # --- Acceleration flags (default off; characterise tolerance with `compare` first) ---
     p.add_argument("--vectorize-anisotropy", action="store_true",
                    help="Use vectorized M @ M.T for all-pairs anisotropy. ~1e-6 drift on aniso aggregates.")
@@ -313,6 +318,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         has_generation=has_generation,
         generation_fn=generation_fn,
         acceleration=acceleration,
+        resume=args.resume,
     )
 
     if not args.skip_sanity_checks:

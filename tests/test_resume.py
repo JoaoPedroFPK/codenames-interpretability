@@ -190,3 +190,39 @@ def test_resume_matches_uninterrupted(scenario, tmp_path, monkeypatch):
     assert completed, f"run never completed after {attempts} attempts"
     assert crashed >= 1, "test did not actually exercise a crash/resume cycle"
     assert digest_dir(str(crash_dir)) == ref_digest
+
+
+@pytest.mark.parametrize("flag,expected", [(["--resume"], True), ([], False)])
+def test_cli_threads_resume_flag(flag, expected, tmp_path, monkeypatch):
+    """The ``run`` subcommand parses ``--resume`` and forwards it verbatim."""
+    import codenames.cli as cli
+    import codenames.data as data
+    import codenames.loop as loop
+    import codenames.persistence as persistence
+
+    meta = {
+        "prefix": "fake", "chat_template_strategy": "raw",
+        "forward_hidden_states_mode": "encoder_load_time", "use_truncation": True,
+        "num_layers": 2, "hidden_dim": 4, "device": "cpu",
+        "supports_generation": False,
+    }
+    monkeypatch.setattr(cli, "_resolve_loader", lambda name: (lambda **kw: (None, None, meta)))
+    monkeypatch.setattr(data, "load_dataset", lambda path: H.make_fake_dataset(3))
+    monkeypatch.setattr(data, "sample_turns", lambda df, n, seed: df)
+    monkeypatch.setattr(persistence, "print_output_summary", lambda **kw: None)
+
+    captured = {}
+
+    def _capture(**kw):
+        captured.update(kw)
+        return {}
+
+    monkeypatch.setattr(loop, "run_extraction", _capture)
+
+    rc = cli.main([
+        "run", "--model", "bert", "--dataset", "x.csv",
+        "--output-dir", str(tmp_path), "--sample-size", "3",
+        "--skip-sanity-checks", *flag,
+    ])
+    assert rc == 0
+    assert captured.get("resume") is expected
