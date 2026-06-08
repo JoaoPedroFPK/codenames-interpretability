@@ -213,9 +213,14 @@ def test_resume_refuses_size_mismatch(tmp_path, monkeypatch):
                       batch_size=1, resume=True, monkeypatch=monkeypatch)
 
 
-@pytest.mark.parametrize("flag,expected", [(["--resume"], True), ([], False)])
-def test_cli_threads_resume_flag(flag, expected, tmp_path, monkeypatch):
-    """The ``run`` subcommand parses ``--resume`` and forwards it verbatim."""
+@pytest.mark.parametrize("flags,exp_resume,exp_reuse", [
+    ([], False, False),
+    (["--resume"], True, False),
+    (["--reuse-canonical"], False, True),
+    (["--resume", "--reuse-canonical"], True, True),
+])
+def test_cli_threads_resume_flag(flags, exp_resume, exp_reuse, tmp_path, monkeypatch):
+    """The ``run`` subcommand parses --resume / --reuse-canonical and forwards them."""
     import codenames.cli as cli
     import codenames.data as data
     import codenames.loop as loop
@@ -243,10 +248,11 @@ def test_cli_threads_resume_flag(flag, expected, tmp_path, monkeypatch):
     rc = cli.main([
         "run", "--model", "bert", "--dataset", "x.csv",
         "--output-dir", str(tmp_path), "--sample-size", "3",
-        "--skip-sanity-checks", *flag,
+        "--skip-sanity-checks", *flags,
     ])
     assert rc == 0
-    assert captured.get("resume") is expected
+    assert captured.get("resume") is exp_resume
+    assert captured.get("reuse_canonical") is exp_reuse
 
 
 # ===========================================================================

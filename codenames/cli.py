@@ -88,6 +88,13 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
                         "committed to checkpoints (per the manifest) and reuse a completed "
                         "condition's outputs. Byte-identical to an uninterrupted run. "
                         "Without this flag, stale checkpoints in --output-dir are wiped.")
+    p.add_argument("--reuse-canonical", action="store_true",
+                   help="Reuse per-board canonical (permutation_id=0) results from a "
+                        "persistent row_id cache in --output-dir, and write newly-computed "
+                        "canonicals back to it. Lets a later, larger run skip the canonical "
+                        "forward pass for boards it shares with an earlier run (shuffles "
+                        "always recomputed). Byte-identical to a non-reusing run. Ignored "
+                        "when --batch-size > 1. Pass it on both runs to populate then reuse.")
     # --- Acceleration flags (default off; characterise tolerance with `compare` first) ---
     p.add_argument("--vectorize-anisotropy", action="store_true",
                    help="Use vectorized M @ M.T for all-pairs anisotropy. ~1e-6 drift on aniso aggregates.")
@@ -319,6 +326,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         generation_fn=generation_fn,
         acceleration=acceleration,
         resume=args.resume,
+        reuse_canonical=args.reuse_canonical,
     )
 
     if not args.skip_sanity_checks:
