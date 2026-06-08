@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from . import canon_cache
 from . import checkpoint
 from .contract import ACCEL_REFERENCE, Acceleration, Contract
 from .data import GIVER_COLS, extract_giver_features
@@ -77,6 +78,7 @@ def run_extraction(
     generation_fn: Optional[Callable] = None,
     acceleration: Acceleration = ACCEL_REFERENCE,
     resume: bool = False,
+    reuse_canonical: bool = False,
 ) -> Dict[str, Dict]:
     """Run the full extraction for both conditions, saving outputs to ``base_dir``.
 
@@ -87,6 +89,17 @@ def run_extraction(
     skipped boards keep their original ``board_idx``, so a resumed run is
     byte-identical to an uninterrupted one. With ``resume=False`` (default) any
     stale checkpoints/manifest in ``base_dir`` are wiped before the run.
+
+    When ``reuse_canonical`` is True (and ``batch_size == 1``), each board's
+    canonical (``permutation_id == 0``) metrics/general/generation are read from
+    a persistent, ``row_id``-keyed cache in ``base_dir`` if present — skipping
+    that board's forward pass — and newly-computed canonical results are written
+    back to the cache. Shuffle permutations are always recomputed, and boards in
+    the vector subsample are never reused (they need a fresh forward pass for
+    their vectors), so the output is byte-identical to a non-reusing run. This
+    lets a later, larger run reuse the canonical work of an earlier, smaller one
+    for the boards they share. Reuse is disabled under batching
+    (``batch_size > 1``), whose canonical values depend on batch composition.
 
     Returns a dict keyed by condition name (``no_social`` / ``with_social``)
     with sub-dicts containing ``general_df``, ``metrics_df``, ``generation_df``,
@@ -136,6 +149,12 @@ def run_extraction(
               f"(canonical + {n_shuffles} shuffles per board)")
         print(f"{'='*60}")
 
+        # --- Canonical reuse is reference-path only (batch_size == 1) ---
+        reuse_effective = reuse_canonical and acceleration.batch_size == 1
+        if reuse_canonical and acceleration.batch_size > 1:
+            print("  [reuse] canonical reuse disabled under batching "
+                  "(batch_size>1); recomputing all canonicals.")
+
         # --- Resume reconciliation (single source of truth = the manifest) ---
         if resume:
             boards_done_resume, ckpt_idx, condition_complete = checkpoint.reconcile(
@@ -156,6 +175,15 @@ def run_extraction(
         if resume and boards_done_resume > 0:
             print(f"  [resume] skipping first {boards_done_resume} "
                   f"already-committed boards; continuing at checkpoint {ckpt_idx}.")
+
+        # Load the canonical cache for read-through reuse (batch_size==1 only).
+        canon_cache_obj = (
+            canon_cache.load(base_dir, prefix, mode_name) if reuse_effective else None
+        )
+        reused_canonical = 0
+        if canon_cache_obj is not None and len(canon_cache_obj):
+            print(f"  [reuse] {len(canon_cache_obj)} cached canonical boards "
+                  f"available for reuse.")
 
         # These lists are flush-and-clear *buffers*: the loop appends to them
         # and ``_flush_checkpoint`` periodically writes their contents to atomic
@@ -403,75 +431,91 @@ def run_extraction(
                 # ==============================================================
                 # Canonical ordering (permutation_id = 0)
                 # ==============================================================
-                try:
-                    save_vecs = (row_id in subsample_ids)
+                save_vecs = (row_id in subsample_ids)
 
-                    g, m, v = run_instance(
-                        row=row,
-                        giver_cols=GIVER_COLS,
-                        use_social_context=mode_flag,
-                        candidates_order=canonical_candidates,
-                        permutation_id=0,
-                        save_vectors=save_vecs,
-                        model=model,
-                        tokenizer=tokenizer,
-                        device=device,
-                        pooling_methods=pooling_methods,
-                        num_layers=num_layers,
-                        hidden_dim=hidden_dim,
-                        chat_template_strategy=chat_template_strategy,
-                        forward_hidden_states_mode=forward_hidden_states_mode,
-                        use_truncation=use_truncation,
-                        max_seq_len=max_seq_len,
-                        acceleration=acceleration,
-                    )
-                    general_records.append(g)
-                    metrics_buffer.extend(m)
-                    if v is not None:
-                        vector_records_all.extend(v)
-
-                    # --- Generation (canonical ordering only, causal-only) ---
-                    if has_generation and generation_fn is not None:
-                        prompt_for_gen, _ = build_prompt(
-                            hint=str(row["output"]),
-                            candidates=canonical_candidates,
-                            giver_features=(
-                                extract_giver_features(row, GIVER_COLS)
-                                if mode_flag else {}
-                            ),
+                # --- Canonical reuse (batch_size==1 only) -------------------
+                # If this board's canonical results are already cached from a
+                # prior run, reuse them and skip the forward pass. Boards in the
+                # vector subsample are never reused (they need a fresh forward
+                # pass to produce vectors). Shuffles below are always recomputed.
+                reuse_this = (
+                    canon_cache_obj is not None and not save_vecs
+                    and canon_cache_obj.has(row_id)
+                )
+                if reuse_this:
+                    general_records.append(canon_cache_obj.general(row_id))
+                    metrics_buffer.extend(canon_cache_obj.metrics(row_id))
+                    if has_generation and canon_cache_obj.has_generation(row_id):
+                        generation_records.append(canon_cache_obj.generation(row_id))
+                    reused_canonical += 1
+                else:
+                    try:
+                        g, m, v = run_instance(
+                            row=row,
+                            giver_cols=GIVER_COLS,
                             use_social_context=mode_flag,
-                            tokenizer=tokenizer,
-                            chat_template_strategy=chat_template_strategy,
-                        )
-                        gen_result = generation_fn(
-                            prompt=prompt_for_gen,
-                            candidates=canonical_candidates,
-                            max_new_tokens=generation_max_tokens,
+                            candidates_order=canonical_candidates,
+                            permutation_id=0,
+                            save_vectors=save_vecs,
                             model=model,
                             tokenizer=tokenizer,
                             device=device,
+                            pooling_methods=pooling_methods,
+                            num_layers=num_layers,
+                            hidden_dim=hidden_dim,
+                            chat_template_strategy=chat_template_strategy,
+                            forward_hidden_states_mode=forward_hidden_states_mode,
+                            use_truncation=use_truncation,
+                            max_seq_len=max_seq_len,
+                            acceleration=acceleration,
                         )
-                        gen_record = {
-                            "row_id"                  : row_id,
-                            "use_social_context"      : mode_flag,
-                            "generated_text"          : gen_result["generated_text"],
-                            "generated_word"          : gen_result["generated_word"],
-                            "generated_in_candidates" : gen_result["generated_in_candidates"],
-                            "generated_correct"       : (
-                                gen_result["generated_word"] in set(row["targets"])
-                                if gen_result["generated_word"] else False
-                            ),
-                        }
-                        for pm in pooling_methods:
-                            gen_record[f"concordance_{pm}"] = (
-                                gen_result["generated_word"] == g[f"predicted_word_{pm}"]
-                                if gen_result["generated_word"] else False
-                            )
-                        generation_records.append(gen_record)
+                        general_records.append(g)
+                        metrics_buffer.extend(m)
+                        if v is not None:
+                            vector_records_all.extend(v)
 
-                except Exception as e:
-                    error_log.append({"row_id": row_id, "error": str(e), "permutation_id": 0})
-                    print(f"  ERROR row_id={row_id} perm=0: {e}")
+                        # --- Generation (canonical ordering only, causal-only) ---
+                        if has_generation and generation_fn is not None:
+                            prompt_for_gen, _ = build_prompt(
+                                hint=str(row["output"]),
+                                candidates=canonical_candidates,
+                                giver_features=(
+                                    extract_giver_features(row, GIVER_COLS)
+                                    if mode_flag else {}
+                                ),
+                                use_social_context=mode_flag,
+                                tokenizer=tokenizer,
+                                chat_template_strategy=chat_template_strategy,
+                            )
+                            gen_result = generation_fn(
+                                prompt=prompt_for_gen,
+                                candidates=canonical_candidates,
+                                max_new_tokens=generation_max_tokens,
+                                model=model,
+                                tokenizer=tokenizer,
+                                device=device,
+                            )
+                            gen_record = {
+                                "row_id"                  : row_id,
+                                "use_social_context"      : mode_flag,
+                                "generated_text"          : gen_result["generated_text"],
+                                "generated_word"          : gen_result["generated_word"],
+                                "generated_in_candidates" : gen_result["generated_in_candidates"],
+                                "generated_correct"       : (
+                                    gen_result["generated_word"] in set(row["targets"])
+                                    if gen_result["generated_word"] else False
+                                ),
+                            }
+                            for pm in pooling_methods:
+                                gen_record[f"concordance_{pm}"] = (
+                                    gen_result["generated_word"] == g[f"predicted_word_{pm}"]
+                                    if gen_result["generated_word"] else False
+                                )
+                            generation_records.append(gen_record)
+
+                    except Exception as e:
+                        error_log.append({"row_id": row_id, "error": str(e), "permutation_id": 0})
+                        print(f"  ERROR row_id={row_id} perm=0: {e}")
 
                 # ==============================================================
                 # Shuffle permutations (permutation_id = 1..K)
@@ -581,6 +625,8 @@ def run_extraction(
         print(f"  Subsample vectors    : {n_vec_records:,} records  ({vec_mb:.1f} MB)")
         print(f"  Generation rows      : {len(generation_df)}")
         print(f"  Errors               : {len(error_log)}")
+        if reuse_effective:
+            print(f"  Reused canonical     : {reused_canonical} boards (cache)")
 
         results[mode_name] = {
             "general_df"    : general_df,
@@ -588,6 +634,18 @@ def run_extraction(
             "generation_df" : generation_df,
             "error_log"     : error_log,
         }
+
+        # Write-back: fold this condition's freshly-computed canonical results
+        # into the persistent row_id-keyed cache so a later run can reuse them.
+        # Derived from the in-memory record-built DataFrames (nested fields
+        # intact), and idempotent — already-cached row_ids are skipped.
+        if reuse_effective:
+            n_added = canon_cache.update(
+                base_dir, prefix, mode_name,
+                general_df=general_df, metrics_df=metrics_df,
+                generation_df=generation_df,
+            )
+            print(f"  Canonical cache      : +{n_added} boards added")
 
         # All final outputs for this condition are on disk. Mark the manifest
         # complete (so a resume after a crash in the *next* condition knows to

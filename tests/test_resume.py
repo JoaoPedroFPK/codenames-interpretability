@@ -247,3 +247,116 @@ def test_cli_threads_resume_flag(flag, expected, tmp_path, monkeypatch):
     ])
     assert rc == 0
     assert captured.get("resume") is expected
+
+
+# ===========================================================================
+# Step 2 — cross-size canonical reuse (P3)
+# ===========================================================================
+
+def _install_counting_fakes(monkeypatch):
+    """Install fakes that count run_instance / run_instance_batched calls."""
+    import codenames.loop as loop
+    state = {"n": 0}
+
+    def _count(fn):
+        def wrapped(**kw):
+            state["n"] += 1
+            return fn(**kw)
+        return wrapped
+
+    monkeypatch.setattr(loop, "run_instance", _count(H.fake_run_instance))
+    monkeypatch.setattr(loop, "run_instance_batched", _count(H.fake_run_instance_batched))
+    return state
+
+
+def _experiment_digest(d):
+    """Digest of experiment-output files only (excludes cache/manifest/ckpt infra)."""
+    infra = ("canoncache", "manifest", "ckpt")
+    return {k: v for k, v in digest_dir(d).items()
+            if not any(tag in k for tag in infra)}
+
+
+def test_canon_cache_update_load_roundtrip(tmp_path):
+    """canon_cache.update is idempotent and load returns the canonical records."""
+    import pandas as pd
+    from codenames import canon_cache
+
+    df = H.make_fake_dataset(4)
+    gens, mets, gen_rows = [], [], []
+    for _, r in df.iterrows():
+        for perm in (0, 1):  # include a shuffle perm; only perm 0 should cache
+            g, m, _ = H.fake_run_instance(
+                row=r, candidates_order=list(r["candidates"]), permutation_id=perm,
+                save_vectors=False, pooling_methods=H.FAKE_POOLING,
+                num_layers=H.FAKE_NUM_LAYERS, hidden_dim=H.FAKE_HIDDEN_DIM,
+                use_truncation=False, use_social_context=False)
+            gens.append(g)
+            mets.extend(m)
+        gen_rows.append({"row_id": int(r["row_id"]), "generated_word": "x"})
+
+    args = dict(general_df=pd.DataFrame(gens), metrics_df=pd.DataFrame(mets),
+                generation_df=pd.DataFrame(gen_rows))
+    n = canon_cache.update(str(tmp_path), "fake", "no_social", **args)
+    assert n == 4
+    # Idempotent: re-adding the same boards adds nothing.
+    assert canon_cache.update(str(tmp_path), "fake", "no_social", **args) == 0
+
+    cache = canon_cache.load(str(tmp_path), "fake", "no_social")
+    assert len(cache) == 4
+    per_board = (H.FAKE_NUM_LAYERS + 1) * (1 + 4)  # layers × (hint + 4 candidates)
+    for rid in range(4):
+        assert cache.has(rid) and cache.has_generation(rid)
+        assert len(cache.metrics(rid)) == per_board
+        assert all(rec["permutation_id"] == 0 for rec in cache.metrics(rid))
+
+
+@pytest.mark.parametrize("has_gen,trunc", [(False, True), (True, False)])
+def test_cross_size_canonical_reuse(has_gen, trunc, tmp_path, monkeypatch):
+    """P3: a larger run reusing a smaller run's cache is byte-identical to the
+    same larger run computed fresh, while skipping forward passes."""
+    small = dict(sample_size=5, has_generation=has_gen, use_truncation=trunc, batch_size=1)
+    large = dict(sample_size=8, has_generation=has_gen, use_truncation=trunc, batch_size=1)
+
+    # 1. Small run with reuse on → builds the cache.
+    cache_dir = str(tmp_path / "cache_dir")
+    os.makedirs(cache_dir)
+    H.install_fakes(monkeypatch)
+    H.run_harness(cache_dir, reuse_canonical=True, monkeypatch=monkeypatch, **small)
+    assert any("canoncache" in f for f in os.listdir(cache_dir)), "cache not written"
+
+    # 2. Reference: large run, no reuse, fresh dir.
+    ref_dir = str(tmp_path / "ref")
+    os.makedirs(ref_dir)
+    ref_state = _install_counting_fakes(monkeypatch)
+    H.run_harness(ref_dir, reuse_canonical=False, monkeypatch=monkeypatch, **large)
+    ref_calls = ref_state["n"]
+    ref_digest = _experiment_digest(ref_dir)
+
+    # 3. Large run WITH reuse, in the dir holding the small run's cache.
+    reuse_state = _install_counting_fakes(monkeypatch)
+    H.run_harness(cache_dir, reuse_canonical=True, monkeypatch=monkeypatch, **large)
+    reuse_calls = reuse_state["n"]
+    reuse_digest = _experiment_digest(cache_dir)
+
+    assert reuse_digest == ref_digest, "reuse changed the output"
+    assert reuse_calls < ref_calls, "reuse did not skip any forward passes"
+
+
+def test_reuse_disabled_under_batching(tmp_path, monkeypatch):
+    """Reuse is gated off when batch_size>1: no cache is written and the output
+    matches a non-reusing batched run."""
+    opts = dict(sample_size=8, has_generation=False, use_truncation=True, batch_size=3)
+
+    ref_dir = str(tmp_path / "ref")
+    os.makedirs(ref_dir)
+    H.install_fakes(monkeypatch)
+    H.run_harness(ref_dir, reuse_canonical=False, monkeypatch=monkeypatch, **opts)
+    ref_digest = _experiment_digest(ref_dir)
+
+    d = str(tmp_path / "d")
+    os.makedirs(d)
+    H.install_fakes(monkeypatch)
+    H.run_harness(d, reuse_canonical=True, monkeypatch=monkeypatch, **opts)
+
+    assert not any("canoncache" in f for f in os.listdir(d)), "cache written under batching"
+    assert _experiment_digest(d) == ref_digest
