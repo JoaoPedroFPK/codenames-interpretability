@@ -155,5 +155,10 @@ def preflight_random_init(
         "aniso_l0_mean": aniso_l0_mean,
         "check1_pass": check1_pass,
         "check2_pass": check2_pass,
-        "all_hard_checks_pass": check1_pass and check2_pass,
+        # Only Check 1 (NaN/Inf) is a HARD stop. Check 2 (norm growth > 100) is a
+        # soft warning — random-init transformers exhibit large residual-stream
+        # norms by design, so the reference notebook prints WARN and proceeds.
+        # Gating the main loop on check2 was a refactor bug (it contradicted the
+        # docstring, the printed summary, and the reference notebook).
+        "all_hard_checks_pass": check1_pass,
     }
