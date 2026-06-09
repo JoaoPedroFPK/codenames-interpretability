@@ -43,6 +43,18 @@ viz = [
     "adjusttext==1.3.0",
 ]
 
+# Google Drive downloader (scripts/download_outputs.py). Pulls the per-model
+# `<prefix>_outputs/` folders off Drive into local `output/`. Local tooling only:
+# NOT installed in Colab and NOT imported by the experiment run/doctor paths, so
+# kept out of the core pin set. Install with `pip install -e ".[download]"`.
+download = [
+    "google-api-python-client==2.149.0",
+    # >=2.47 so it coexists with google-cloud-* already in the local env.
+    "google-auth==2.47.0",
+    "google-auth-oauthlib==1.2.1",
+    "google-auth-httplib2==0.2.0",
+]
+
 [project.scripts]
 codenames-experiment = "codenames.cli:main"
 

@@ -57,3 +57,8 @@ ENV/
 tests/test_viz.py
 
 *_TASK.md
+
+
+client_secret.json
+client_secret_*.json
+token.json
