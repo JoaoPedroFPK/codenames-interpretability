@@ -232,9 +232,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Skip the heavy *_f16.npz hidden-state vector dumps "
                              "(~3.7 GB). The per-layer summaries and metrics still "
                              "download; vectors stay on Drive, re-fetchable later.")
+    parser.add_argument("--only-vectors", action="store_true",
+                        help="Download ONLY the *_f16.npz vector dumps (the inverse "
+                             "of --skip-vectors). Use to restore the vectors that "
+                             "codenames/viz needs after a --skip-vectors run; combine "
+                             "with --models to fetch just one architecture.")
     parser.add_argument("--force", action="store_true", help="Re-download even if a same-size local copy exists")
     parser.add_argument("--dry-run", action="store_true", help="List what would be downloaded, fetch nothing")
     args = parser.parse_args(argv)
+
+    if args.skip_vectors and args.only_vectors:
+        parser.error("--skip-vectors and --only-vectors are mutually exclusive")
 
     google = _import_google()
     HttpError = google["HttpError"]
@@ -279,6 +287,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             data_files = [f for f in files if f.get("mimeType") != FOLDER_MIME]
             if args.skip_vectors:
                 data_files = [f for f in data_files if not f["name"].endswith(".npz")]
+            if args.only_vectors:
+                data_files = [f for f in data_files if f["name"].endswith(".npz")]
             print(f"\n{folder_name}/  ({len(data_files)} files) -> {os.path.relpath(local_dir, REPO_ROOT)}/")
             if not args.dry_run:
                 os.makedirs(local_dir, exist_ok=True)
