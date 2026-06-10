@@ -29,6 +29,37 @@ from .style import save_figure, select_layers
 _SEP = "  ·  "
 
 
+def shared_board_sample(
+    output_root: str,
+    n_boards: int,
+    *,
+    pooling: str = "mean",
+    seed: int = 42,
+) -> tuple:
+    """Deterministic board ids present in EVERY discovered model's subsample.
+
+    Computes the intersection of the per-model subsample board sets (index CSVs
+    only — no vectors loaded) and reproducibly samples ``n_boards`` from it. The
+    selection is a pure function of (shared id-set, seed), so it is identical no
+    matter which model — or how many — you render. This is what makes the same
+    boards line up across models for direct comparison.
+
+    Returns ``(board_ids, info)`` where ``info`` carries ``per_model`` counts and
+    the ``shared`` intersection size. ``board_ids`` is empty if the models share
+    no boards (e.g. different run sizes/seeds).
+    """
+    models = loader.discover_models(output_root)
+    per_model = {
+        rec["name"]: loader.subsample_board_ids(rec["dir"], rec["prefix"], pooling)
+        for rec in models
+    }
+    nonempty = [s for s in per_model.values() if s]
+    shared = set.intersection(*nonempty) if nonempty else set()
+    board_ids = loader.sample_ids(shared, n_boards, seed) if shared else []
+    info = {"per_model": {k: len(v) for k, v in per_model.items()}, "shared": len(shared)}
+    return board_ids, info
+
+
 def _board_title(model: str, row_id: int, meta: Dict, suffix: str = "") -> str:
     hint = meta.get("hint")
     nt = meta.get("n_targets")
@@ -63,13 +94,20 @@ def run(
     k: int = 5,
     formats: Sequence[str] = ("pdf", "png"),
     boards: Optional[Sequence[int]] = None,
+    cross_model: bool = True,
 ) -> Dict:
     """Generate the figure set for one model. Returns a small summary dict.
 
-    If ``boards`` is given, those exact row_ids are used (any not available for
-    this model are skipped with a warning) — this is how the same boards are
-    visualised across models for direct comparison. Otherwise ``n_boards`` are
-    sampled reproducibly from this model's own subsample.
+    Board selection, in priority order:
+
+    1. If ``boards`` is given, those exact row_ids are used (any not available
+       for this model are skipped with a warning).
+    2. Else if ``cross_model`` (the default), ``n_boards`` are sampled from the
+       intersection of subsample boards across ALL discovered models — so a
+       single-model run picks the SAME boards another model's run would, making
+       them directly comparable without ``--all``.
+    3. Else (or if the models share no boards), ``n_boards`` are sampled from
+       this model's own subsample.
     """
     import matplotlib.pyplot as plt
 
@@ -114,6 +152,19 @@ def run(
         if not board_ids:
             print(f"[viz]   no requested boards available for '{name}'; skipping.")
             return {"model": name, "boards": [], "layers": sel_layers, "figures": 0}
+    elif cross_model:
+        shared_ids, info = shared_board_sample(
+            output_root, n_boards, pooling=pooling, seed=seed)
+        avail = set(int(x) for x in pool_index["row_id"].unique())
+        board_ids = [b for b in shared_ids if b in avail]
+        if board_ids:
+            print(f"[viz]   cross-model shared boards "
+                  f"(intersection of {len(info['per_model'])} models, "
+                  f"{info['shared']} shared): {board_ids}")
+        else:
+            print("[viz]   no cross-model shared boards available; "
+                  "falling back to this model's own sample.")
+            board_ids = loader.sample_boards(pool_index, n_boards, seed)
     else:
         board_ids = loader.sample_boards(pool_index, n_boards, seed)
     print(f"[viz]   layers={sel_layers}  boards={board_ids}")
@@ -200,21 +251,15 @@ def run_all(
         raise SystemExit(f"No model outputs found under '{output_root}'.")
 
     if boards is None:
-        per_model = {
-            rec["name"]: loader.subsample_board_ids(rec["dir"], rec["prefix"], pooling)
-            for rec in models
-        }
-        shared = set.intersection(*per_model.values()) if per_model else set()
-        print(f"[viz] models: {list(per_model)}")
-        print(f"[viz] shared boards across all models: {len(shared)}")
-        if shared:
-            boards = loader.sample_ids(shared, n_boards, seed)
+        boards, info = shared_board_sample(output_root, n_boards, pooling=pooling, seed=seed)
+        print(f"[viz] models: {list(info['per_model'])}")
+        print(f"[viz] shared boards across all models: {info['shared']}")
+        if boards:
             print(f"[viz] using SHARED boards for all models: {boards}")
         else:
-            sizes = {m: len(s) for m, s in per_model.items()}
             print("[viz] WARNING: models have NO common subsample boards "
-                  f"(per-model counts: {sizes}). This usually means they were run "
-                  "with different run sizes/seeds. Falling back to per-model "
+                  f"(per-model counts: {info['per_model']}). This usually means they "
+                  "were run with different run sizes/seeds. Falling back to per-model "
                   "sampling — boards will NOT be comparable across models.")
 
     summaries = []

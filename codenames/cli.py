@@ -243,8 +243,10 @@ def _make_visualize_parser(sp: "argparse._SubParsersAction") -> argparse.Argumen
     p.add_argument("--boards", default=None,
                    help="Comma-separated explicit board row_ids to visualize. Pins the "
                         "SAME boards across models for direct comparison. Overrides "
-                        "--n-boards. With --all and no --boards, boards are sampled from "
-                        "the intersection available across all models.")
+                        "--n-boards. When omitted, boards are sampled from the "
+                        "intersection available across ALL discovered models (for both "
+                        "single-model and --all runs), so the selection is identical "
+                        "across models by default.")
     return p
 
 
