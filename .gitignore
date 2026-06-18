@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Testing / linting
+.pytest_cache/
+.coverage
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / agent tooling
+.claude/
+
+# Local output data from experiments, not to be committed
+/output
+
+# Generated visualization output (figures + per-board dr_quality CSVs),
+# regenerated on demand via `codenames-experiment visualize`.
+/visualization/
+
+# Reference example images for the visualization task (inputs, not generated)
+/heatmap.png
+/umap.png
+
+# Thesis PDF — distributed separately, not committed
+TCC.pdf
+
+# Credentials
+client_secret.json
+client_secret_*.json
+token.json

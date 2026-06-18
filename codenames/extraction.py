@@ -1,0 +1,803 @@
+"""Per-board extraction.
+
+``run_instance`` runs a single forward pass and computes the per-board
+metrics; it is the hot loop of the package. A 3-way dispatch on
+``forward_hidden_states_mode`` covers the architectures in the suite:
+
+- ``"causal"`` (Mistral, Qwen, Random Qwen): explicit ``input_ids`` /
+  ``attention_mask``, ``output_hidden_states=True`` passed at inference.
+- ``"encoder_load_time"`` (BERT, T5, BERT-Random): ``output_hidden_states``
+  set on the config, plain ``**inputs_for_model``.
+- ``"encoder_inference"`` (ModernBERT): ``**inputs_for_model`` with
+  ``output_hidden_states=True`` and ``return_dict=True`` at inference.
+
+A ``use_truncation`` flag toggles the tokenizer's ``max_length`` /
+``truncation`` arguments; the encoder models use truncation, the causal
+models do not.
+"""
+
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+
+from .contract import ACCEL_REFERENCE, Acceleration
+from .data import extract_giver_features
+from .prompts import build_prompt
+from .spans import cosine_similarity_np, find_token_spans, pool_span
+
+
+def run_instance(
+    row: pd.Series,
+    giver_cols: List[str],
+    use_social_context: bool,
+    candidates_order: List[str],
+    permutation_id: int = 0,
+    save_vectors: bool = False,
+    *,
+    model,
+    tokenizer,
+    device: str,
+    pooling_methods: Tuple[str, ...],
+    num_layers: int,
+    hidden_dim: int,
+    chat_template_strategy: str,
+    forward_hidden_states_mode: str,
+    use_truncation: bool,
+    max_seq_len: int = 512,
+    acceleration: Acceleration = ACCEL_REFERENCE,
+) -> Tuple[Dict, List[Dict], Optional[List[Dict]]]:
+    """Process a single board under a given candidate ordering.
+
+    Parameters
+    ----------
+    row
+        One row from the sampled dataset.
+    giver_cols
+        Column names for giver demographic features.
+    use_social_context
+        If True, include giver features in the prompt.
+    candidates_order
+        The candidate words in the desired order. For the canonical run this
+        is alphabetical; for shuffles it is a random permutation.
+    permutation_id
+        0 = canonical (alphabetical) ordering. 1..K = shuffles.
+    save_vectors
+        If True, raw vectors are retained for the subsample.
+    model, tokenizer, device, pooling_methods, num_layers, hidden_dim
+        Module-globals in the original notebooks; passed in here.
+    chat_template_strategy
+        One of ``"mistral_inst"``, ``"chatml"``, ``"raw"``. Forwarded to
+        :func:`prompts.build_prompt`.
+    forward_hidden_states_mode
+        One of ``"causal"``, ``"encoder_load_time"``, ``"encoder_inference"``.
+        Selects how the forward pass is invoked and where
+        ``output_hidden_states=True`` is set.
+    use_truncation
+        If True, tokenize with ``max_length=max_seq_len, truncation=True`` and
+        emit a ``"truncated"`` flag in the general record.
+    max_seq_len
+        Truncation length when ``use_truncation`` is True. Default 512.
+    acceleration
+        Implementation-detail flags (vectorized anisotropy, FA2, batch_size).
+        Defaults to ``ACCEL_REFERENCE`` (all flags off = original code path).
+        Individual flags are honoured at their respective code sites later
+        in the function and in :func:`loop.run_extraction`.
+    """
+    row_id     = int(row["row_id"])
+    hint       = str(row["output"])
+    candidates = list(candidates_order)
+    targets    = set(row["targets"])
+    black      = set(row["black"])
+    tan        = set(row["tan"])
+
+    giver_features = (
+        extract_giver_features(row, giver_cols)
+        if use_social_context else {}
+    )
+
+    prompt, feature_markers = build_prompt(
+        hint=hint,
+        candidates=candidates,
+        giver_features=giver_features,
+        use_social_context=use_social_context,
+        tokenizer=tokenizer,
+        chat_template_strategy=chat_template_strategy,
+    )
+
+    # --- Tokenization (with truncation for encoder models with a hard limit) ---
+    if use_truncation:
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+            max_length=max_seq_len,
+            truncation=True,
+        ).to(device)
+    else:
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+        ).to(device)
+
+    offset_mapping     = inputs["offset_mapping"][0].tolist()
+    prompt_token_count = inputs["input_ids"].shape[1]
+    truncated          = use_truncation and (prompt_token_count >= max_seq_len)
+
+    # --- Build span targets ---
+    spans_to_find = {"hint": hint}
+    for c in candidates:
+        spans_to_find[f"cand:{c}"] = c
+    if use_social_context:
+        for k, marker in feature_markers.items():
+            spans_to_find[f"giver:{k}"] = marker
+
+    spans = find_token_spans(prompt, offset_mapping, spans_to_find)
+
+    if "hint" not in spans:
+        raise ValueError(
+            f"Hint span not found for row_id={row_id}, hint='{hint}'."
+        )
+
+    candidate_position_map = {w: i for i, w in enumerate(candidates)}
+
+    # --- Forward pass (3-way dispatch on forward_hidden_states_mode) ---
+    if forward_hidden_states_mode == "causal":
+        # Causal LMs (Mistral, Qwen, Random_Qwen): explicit input_ids /
+        # attention_mask, output_hidden_states passed at inference.
+        with torch.no_grad():
+            outputs = model(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    elif forward_hidden_states_mode == "encoder_load_time":
+        # BertModel / T5EncoderModel: output_hidden_states already on config.
+        # Strip offset_mapping (these classes don't accept it).
+        inputs_for_model = {k: v for k, v in inputs.items() if k != "offset_mapping"}
+        with torch.no_grad():
+            outputs = model(**inputs_for_model)
+    elif forward_hidden_states_mode == "encoder_inference":
+        # AutoModel (ModernBERT): output_hidden_states must be passed at
+        # inference time, NOT on the config — the AutoModel convention.
+        inputs_for_model = {k: v for k, v in inputs.items() if k != "offset_mapping"}
+        with torch.no_grad():
+            outputs = model(
+                **inputs_for_model,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    else:
+        raise ValueError(
+            f"Unknown forward_hidden_states_mode: {forward_hidden_states_mode!r}. "
+            "Expected one of: 'causal', 'encoder_load_time', 'encoder_inference'."
+        )
+
+    # Extract per-board hidden states (drop the singleton batch dim) and
+    # delegate the rest of the work to the shared finalize helper. This
+    # helper is also used by the batched code path; see _run_instance_batched.
+    hidden_states_one_board = tuple(outputs.hidden_states[layer][0]
+                                    for layer in range(num_layers + 1))
+
+    general_record, metrics_records, vector_records = _finalize_board(
+        hidden_states_one_board=hidden_states_one_board,
+        row_id=row_id,
+        hint=hint,
+        candidates=candidates,
+        targets=targets,
+        black=black,
+        tan=tan,
+        spans=spans,
+        feature_markers=feature_markers,
+        use_social_context=use_social_context,
+        permutation_id=permutation_id,
+        save_vectors=save_vectors,
+        prompt_token_count=prompt_token_count,
+        truncated=truncated,
+        giver_features=giver_features,
+        pooling_methods=pooling_methods,
+        num_layers=num_layers,
+        use_truncation=use_truncation,
+        acceleration=acceleration,
+    )
+
+    del outputs, hidden_states_one_board
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    return general_record, metrics_records, vector_records
+
+
+def _finalize_board(
+    *,
+    hidden_states_one_board,
+    row_id: int,
+    hint: str,
+    candidates: List[str],
+    targets,
+    black,
+    tan,
+    spans: Dict[str, Tuple[int, int]],
+    feature_markers: Dict[str, str],
+    use_social_context: bool,
+    permutation_id: int,
+    save_vectors: bool,
+    prompt_token_count: int,
+    truncated: bool,
+    giver_features: Dict,
+    pooling_methods: Tuple[str, ...],
+    num_layers: int,
+    use_truncation: bool,
+    acceleration: Acceleration,
+) -> Tuple[Dict, List[Dict], Optional[List[Dict]]]:
+    """Compute records for one board given its per-layer hidden states.
+
+    ``hidden_states_one_board`` is a tuple of ``num_layers + 1`` tensors,
+    each shape ``[seq_len, hidden_dim]`` (no batch dimension). All other
+    arguments are the per-board state computed before the forward pass.
+
+    Shared between :func:`run_instance` (single-board path) and
+    :func:`_run_instance_batched` (batched path).
+    """
+    candidate_position_map = {w: i for i, w in enumerate(candidates)}
+
+    metrics_records: List[Dict] = []
+    vector_records: Optional[List[Dict]] = [] if save_vectors else None
+
+    cosines_per_method: Dict[str, Dict[str, float]] = {}
+    ranks_per_method: Dict[str, Dict[str, float]] = {}
+    cand_meta: Dict[str, Dict] = {}
+
+    for layer_idx in range(num_layers + 1):
+        layer_hs = hidden_states_one_board[layer_idx]
+
+        # --- Pool hint vector ---
+        hint_vecs = {pm: pool_span(layer_hs, spans["hint"], method=pm)
+                     for pm in pooling_methods}
+        hint_token_count = spans["hint"][1] - spans["hint"][0]
+
+        # --- Pool candidate vectors ---
+        cand_vecs = {}
+        cand_meta = {}
+        for c in candidates:
+            if c in targets:
+                c_type = "target"
+            elif c in black:
+                c_type = "black"
+            elif c in tan:
+                c_type = "tan"
+            else:
+                c_type = "unknown"
+
+            ck = f"cand:{c}"
+            cand_vecs[c] = {}
+            if ck in spans:
+                c_token_count = spans[ck][1] - spans[ck][0]
+                for pm in pooling_methods:
+                    cand_vecs[c][pm] = pool_span(layer_hs, spans[ck], method=pm)
+            else:
+                c_token_count = 0
+                for pm in pooling_methods:
+                    cand_vecs[c][pm] = None
+            cand_meta[c] = {"word_type": c_type, "token_count": c_token_count}
+
+        # --- Pool giver feature vectors (with_social only) ---
+        giver_vecs = {}
+        giver_token_counts = {}
+        if use_social_context:
+            for feat_name, marker in feature_markers.items():
+                fk = f"giver:{feat_name}"
+                giver_vecs[feat_name] = {}
+                if fk in spans:
+                    giver_token_counts[feat_name] = spans[fk][1] - spans[fk][0]
+                    for pm in pooling_methods:
+                        giver_vecs[feat_name][pm] = pool_span(layer_hs, spans[fk], method=pm)
+                else:
+                    giver_token_counts[feat_name] = 0
+                    for pm in pooling_methods:
+                        giver_vecs[feat_name][pm] = None
+
+        # --- Cosines: hint -> each candidate, per pooling method ---
+        cosines_per_method = {}
+        for pm in pooling_methods:
+            cosines_per_method[pm] = {}
+            h_vec = hint_vecs[pm]
+            if h_vec is None:
+                for c in candidates:
+                    cosines_per_method[pm][c] = float("nan")
+                continue
+            h_vec_f32 = h_vec.astype(np.float32)
+            for c in candidates:
+                c_vec = cand_vecs[c][pm]
+                if c_vec is not None:
+                    cosines_per_method[pm][c] = cosine_similarity_np(
+                        h_vec_f32, c_vec.astype(np.float32)
+                    )
+                else:
+                    cosines_per_method[pm][c] = float("nan")
+
+        # --- Ranks per pooling method ---
+        ranks_per_method = {}
+        for pm in pooling_methods:
+            valid_cosines = {
+                w: v for w, v in cosines_per_method[pm].items()
+                if not np.isnan(v)
+            }
+            sorted_words = sorted(
+                valid_cosines.keys(),
+                key=lambda w: valid_cosines[w],
+                reverse=True,
+            )
+            ranks_per_method[pm] = {}
+            for rank_pos, w in enumerate(sorted_words, start=1):
+                ranks_per_method[pm][w] = rank_pos
+            for c in candidates:
+                if c not in ranks_per_method[pm]:
+                    ranks_per_method[pm][c] = float("nan")
+
+        # --- All-pairs candidate cosines for anisotropy (mean pooling) ---
+        valid_cand_vecs_mean = []
+        for c in candidates:
+            v = cand_vecs[c]["mean"]
+            if v is not None:
+                valid_cand_vecs_mean.append(v.astype(np.float32))
+        n_valid = len(valid_cand_vecs_mean)
+
+        if n_valid >= 2:
+            if acceleration.vectorize_anisotropy:
+                # Vectorized path: single matrix product instead of nested
+                # Python loop. The matmul reorders ~hidden_dim fp32 additions
+                # per cosine, so the resulting cosines drift by ~1e-7 per
+                # element vs the per-pair np.dot. The aggregate
+                # layer_mean_pairwise_cosine sees ~1e-6 drift at most.
+                M = np.stack(valid_cand_vecs_mean)
+                norms = np.linalg.norm(M, axis=1)
+                # Match the reference path: zero-norm rows produce 0.0
+                # cosines, not NaN. Replace zero norms with 1.0 then zero
+                # those rows post-normalization.
+                safe_norms = np.where(norms == 0.0, 1.0, norms)
+                M_norm = M / safe_norms[:, None]
+                M_norm[norms == 0.0] = 0.0
+                sim = M_norm @ M_norm.T
+                iu = np.triu_indices(n_valid, k=1)
+                pair_cosines = sim[iu]
+                layer_aniso_mean = float(pair_cosines.mean())
+                layer_aniso_std = float(pair_cosines.std())
+            else:
+                all_pair_cosines_layer = []
+                for i in range(n_valid):
+                    for j in range(i + 1, n_valid):
+                        all_pair_cosines_layer.append(
+                            cosine_similarity_np(
+                                valid_cand_vecs_mean[i],
+                                valid_cand_vecs_mean[j],
+                            )
+                        )
+                layer_aniso_mean = float(np.mean(all_pair_cosines_layer))
+                layer_aniso_std = float(np.std(all_pair_cosines_layer))
+        else:
+            layer_aniso_mean = float("nan")
+            layer_aniso_std = float("nan")
+
+        # --- Build metric records: hint ---
+        hint_metric = {
+            "row_id"                     : row_id,
+            "layer"                      : layer_idx,
+            "word"                       : hint,
+            "word_type"                  : "hint",
+            "token_count"                : hint_token_count,
+            "list_position"              : -1,
+            "use_social_context"         : use_social_context,
+            "permutation_id"             : permutation_id,
+            "layer_mean_pairwise_cosine" : layer_aniso_mean,
+            "layer_std_pairwise_cosine"  : layer_aniso_std,
+        }
+        for pm in pooling_methods:
+            hint_metric[f"cosine_to_hint_{pm}"]  = float("nan")
+            hint_metric[f"rank_{pm}"]            = float("nan")
+            hint_metric[f"reciprocal_rank_{pm}"] = float("nan")
+        metrics_records.append(hint_metric)
+
+        # --- Build metric records: candidates ---
+        for c in candidates:
+            c_metric = {
+                "row_id"                     : row_id,
+                "layer"                      : layer_idx,
+                "word"                       : c,
+                "word_type"                  : cand_meta[c]["word_type"],
+                "token_count"                : cand_meta[c]["token_count"],
+                "list_position"              : candidate_position_map[c],
+                "use_social_context"         : use_social_context,
+                "permutation_id"             : permutation_id,
+                "layer_mean_pairwise_cosine" : layer_aniso_mean,
+                "layer_std_pairwise_cosine"  : layer_aniso_std,
+            }
+            for pm in pooling_methods:
+                cos_val  = cosines_per_method[pm][c]
+                rank_val = ranks_per_method[pm][c]
+                c_metric[f"cosine_to_hint_{pm}"]  = cos_val
+                c_metric[f"rank_{pm}"]            = rank_val
+                c_metric[f"reciprocal_rank_{pm}"] = (
+                    1.0 / rank_val if not np.isnan(rank_val) else float("nan")
+                )
+            metrics_records.append(c_metric)
+
+        # --- Build metric records: giver features ---
+        if use_social_context:
+            for feat_name in feature_markers:
+                gf_metric = {
+                    "row_id"                     : row_id,
+                    "layer"                      : layer_idx,
+                    "word"                       : feat_name,
+                    "word_type"                  : "giver_feature",
+                    "token_count"                : giver_token_counts.get(feat_name, 0),
+                    "list_position"              : -1,
+                    "use_social_context"         : use_social_context,
+                    "permutation_id"             : permutation_id,
+                    "layer_mean_pairwise_cosine" : layer_aniso_mean,
+                    "layer_std_pairwise_cosine"  : layer_aniso_std,
+                }
+                for pm in pooling_methods:
+                    h_vec = hint_vecs[pm]
+                    g_vec = giver_vecs[feat_name].get(pm)
+                    if h_vec is not None and g_vec is not None:
+                        gf_metric[f"cosine_to_hint_{pm}"] = cosine_similarity_np(
+                            h_vec.astype(np.float32), g_vec.astype(np.float32)
+                        )
+                    else:
+                        gf_metric[f"cosine_to_hint_{pm}"] = float("nan")
+                    gf_metric[f"rank_{pm}"]            = float("nan")
+                    gf_metric[f"reciprocal_rank_{pm}"] = float("nan")
+                metrics_records.append(gf_metric)
+
+        # --- Save vectors (subsample, canonical only) ---
+        if save_vectors:
+            for pm in pooling_methods:
+                vector_records.append({
+                    "row_id": row_id, "layer": layer_idx,
+                    "word": hint, "word_type": "hint",
+                    "token_count": hint_token_count,
+                    "pooling_method": pm,
+                    "use_social_context": use_social_context,
+                    "vector": hint_vecs[pm],
+                })
+            for c in candidates:
+                for pm in pooling_methods:
+                    vector_records.append({
+                        "row_id": row_id, "layer": layer_idx,
+                        "word": c, "word_type": cand_meta[c]["word_type"],
+                        "token_count": cand_meta[c]["token_count"],
+                        "pooling_method": pm,
+                        "use_social_context": use_social_context,
+                        "vector": cand_vecs[c][pm],
+                    })
+            if use_social_context:
+                for feat_name in feature_markers:
+                    for pm in pooling_methods:
+                        vector_records.append({
+                            "row_id": row_id, "layer": layer_idx,
+                            "word": feat_name, "word_type": "giver_feature",
+                            "token_count": giver_token_counts.get(feat_name, 0),
+                            "pooling_method": pm,
+                            "use_social_context": use_social_context,
+                            "vector": giver_vecs[feat_name].get(pm),
+                        })
+
+    # ================================================================
+    # Behavioral prediction at final layer (per pooling method)
+    # ================================================================
+    # cosines_per_method and ranks_per_method now hold final-layer values.
+
+    predicted_words = {}
+    correct_flags   = {}
+    for pm in pooling_methods:
+        valid_scores = {
+            w: cosines_per_method[pm][w]
+            for w in candidates
+            if not np.isnan(cosines_per_method[pm].get(w, float("nan")))
+        }
+        pw = max(valid_scores, key=valid_scores.get) if valid_scores else None
+        predicted_words[pm] = pw
+        correct_flags[pm]   = (pw in targets) if pw else False
+
+    # Rank aggregation metrics
+    rank_metrics = {}
+    for pm in pooling_methods:
+        target_ranks = [
+            ranks_per_method[pm][w]
+            for w in candidates
+            if cand_meta[w]["word_type"] == "target"
+            and not np.isnan(ranks_per_method[pm].get(w, float("nan")))
+        ]
+        if target_ranks:
+            rank_metrics[f"mean_target_rank_{pm}"] = float(np.mean(target_ranks))
+            rank_metrics[f"min_target_rank_{pm}"]  = float(np.min(target_ranks))
+            rank_metrics[f"max_target_rank_{pm}"]  = float(np.max(target_ranks))
+            rank_metrics[f"mrr_{pm}"]              = float(1.0 / np.min(target_ranks))
+            rank_metrics[f"hit_at_1_{pm}"]         = float(np.min(target_ranks) == 1)
+            rank_metrics[f"hit_at_3_{pm}"]         = float(np.min(target_ranks) <= 3)
+            rank_metrics[f"hit_at_5_{pm}"]         = float(np.min(target_ranks) <= 5)
+        else:
+            for suffix in ["mean_target_rank", "min_target_rank",
+                           "max_target_rank", "mrr",
+                           "hit_at_1", "hit_at_3", "hit_at_5"]:
+                rank_metrics[f"{suffix}_{pm}"] = float("nan")
+
+    # Distance metrics
+    distance_metrics = {}
+    for pm in pooling_methods:
+        tgt_cos = [
+            cosines_per_method[pm][w] for w in candidates
+            if cand_meta[w]["word_type"] == "target"
+            and not np.isnan(cosines_per_method[pm].get(w, float("nan")))
+        ]
+        non_cos = [
+            cosines_per_method[pm][w] for w in candidates
+            if cand_meta[w]["word_type"] in ("black", "tan")
+            and not np.isnan(cosines_per_method[pm].get(w, float("nan")))
+        ]
+        distance_metrics[f"mean_cos_hint_targets_{pm}"]    = float(np.mean(tgt_cos)) if tgt_cos else float("nan")
+        distance_metrics[f"mean_cos_hint_nontargets_{pm}"] = float(np.mean(non_cos)) if non_cos else float("nan")
+        distance_metrics[f"raw_margin_{pm}"] = (
+            (float(np.mean(tgt_cos)) - float(np.mean(non_cos)))
+            if tgt_cos and non_cos else float("nan")
+        )
+        valid_scores = {
+            w: cosines_per_method[pm][w] for w in candidates
+            if not np.isnan(cosines_per_method[pm].get(w, float("nan")))
+        }
+        sorted_scores = sorted(valid_scores.values(), reverse=True)
+        distance_metrics[f"cos_gap_r1_r2_{pm}"] = (
+            sorted_scores[0] - sorted_scores[1]
+            if len(sorted_scores) >= 2 else float("nan")
+        )
+
+    missing_spans = [c for c in candidates if f"cand:{c}" not in spans]
+
+    general_record: Dict = {
+        "row_id"             : row_id,
+        "hint"               : hint,
+        "n_targets"          : len(targets),
+        "n_candidates"       : len(candidates),
+        "n_missing_spans"    : len(missing_spans),
+        "missing_span_words" : missing_spans,
+        "prompt_token_count" : prompt_token_count,
+    }
+    # Only encoder models with truncation populate this column; causal general
+    # records omit it entirely.
+    if use_truncation:
+        general_record["truncated"] = truncated
+    general_record.update({
+        "use_social_context" : use_social_context,
+        "permutation_id"     : permutation_id,
+        "giver_features"     : giver_features if use_social_context else {},
+    })
+    for pm in pooling_methods:
+        general_record[f"predicted_word_{pm}"] = predicted_words[pm]
+        general_record[f"correct_{pm}"]        = correct_flags[pm]
+    general_record.update(rank_metrics)
+    general_record.update(distance_metrics)
+
+    return general_record, metrics_records, vector_records
+
+
+def run_instance_batched(
+    rows: List[pd.Series],
+    giver_cols: List[str],
+    use_social_context: bool,
+    candidates_orders: List[List[str]],
+    permutation_ids: List[int],
+    save_vectors_flags: List[bool],
+    *,
+    model,
+    tokenizer,
+    device: str,
+    pooling_methods: Tuple[str, ...],
+    num_layers: int,
+    hidden_dim: int,
+    chat_template_strategy: str,
+    forward_hidden_states_mode: str,
+    use_truncation: bool,
+    max_seq_len: int = 512,
+    acceleration: Acceleration = ACCEL_REFERENCE,
+) -> List[Tuple[Dict, List[Dict], Optional[List[Dict]]]]:
+    """Process a list of boards in a single batched forward pass.
+
+    All boards in one call share ``use_social_context`` (one condition per
+    call). They can have different ``candidates_orders`` (canonical or
+    shuffled), different ``permutation_ids``, and different
+    ``save_vectors_flags``.
+
+    Per-board tokenization happens individually (so each board gets its own
+    ``offset_mapping``), then prompts are padded to a common max length and
+    sent through the model in one forward pass. The hidden states are then
+    sliced per board and ``_finalize_board`` is called on each slice.
+
+    Boards in the same batch share fp16 attention reductions over the
+    sequence dimension, which is the source of the per-cell drift vs the
+    single-board reference path. The comparison harness quantifies this.
+    """
+    assert len(rows) == len(candidates_orders) == len(permutation_ids) == len(save_vectors_flags)
+    if len(rows) == 0:
+        return []
+
+    # --- Per-board pre-forward state (separate tokenization for offset_mapping) ---
+    # Boards whose hint span fails are recorded as None in the output and
+    # skipped from the batched forward pass — matching the per-board path's
+    # error isolation (one bad board doesn't poison the whole chunk).
+    per_board_state: List[Optional[Dict]] = []  # one slot per input row; None on failure
+    prompts: List[str] = []
+    token_lengths: List[int] = []
+    active_indices: List[int] = []  # indices in `rows` that survived pre-forward checks
+
+    for board_idx, (row, candidates_order) in enumerate(zip(rows, candidates_orders)):
+        row_id = int(row["row_id"])
+        hint = str(row["output"])
+        candidates = list(candidates_order)
+        targets = set(row["targets"])
+        black = set(row["black"])
+        tan = set(row["tan"])
+
+        giver_features = (
+            extract_giver_features(row, giver_cols)
+            if use_social_context else {}
+        )
+
+        prompt, feature_markers = build_prompt(
+            hint=hint,
+            candidates=candidates,
+            giver_features=giver_features,
+            use_social_context=use_social_context,
+            tokenizer=tokenizer,
+            chat_template_strategy=chat_template_strategy,
+        )
+
+        if use_truncation:
+            single_inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                return_offsets_mapping=True,
+                max_length=max_seq_len,
+                truncation=True,
+            )
+        else:
+            single_inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                return_offsets_mapping=True,
+            )
+        offset_mapping = single_inputs["offset_mapping"][0].tolist()
+        prompt_token_count = int(single_inputs["input_ids"].shape[1])
+        truncated = use_truncation and (prompt_token_count >= max_seq_len)
+
+        spans_to_find = {"hint": hint}
+        for c in candidates:
+            spans_to_find[f"cand:{c}"] = c
+        if use_social_context:
+            for k, marker in feature_markers.items():
+                spans_to_find[f"giver:{k}"] = marker
+        spans = find_token_spans(prompt, offset_mapping, spans_to_find)
+
+        if "hint" not in spans:
+            print(
+                f"  WARN run_instance_batched: hint span not found for "
+                f"row_id={row_id}, hint='{hint}'. Excluding from batch."
+            )
+            per_board_state.append(None)
+            continue
+
+        per_board_state.append({
+            "row_id": row_id,
+            "hint": hint,
+            "candidates": candidates,
+            "targets": targets,
+            "black": black,
+            "tan": tan,
+            "spans": spans,
+            "feature_markers": feature_markers,
+            "giver_features": giver_features,
+            "prompt_token_count": prompt_token_count,
+            "truncated": truncated,
+        })
+        prompts.append(prompt)
+        token_lengths.append(prompt_token_count)
+        active_indices.append(board_idx)
+
+    if not prompts:
+        # All boards in the batch failed pre-forward checks. Return Nones.
+        return [None] * len(rows)  # type: ignore[list-item]
+
+    # --- Batched tokenization with padding ---
+    # Force right-padding for batched extraction so that
+    # hidden_states_batched[layer][board_idx, :seq_len, :] reliably indexes
+    # the real (unpadded) tokens of each board. Causal LM tokenizers
+    # (Mistral, Qwen) default to padding_side='left' for generation; we
+    # save and restore the original value to leave the tokenizer untouched
+    # for any downstream generation call.
+    _orig_padding_side = getattr(tokenizer, "padding_side", "right")
+    tokenizer.padding_side = "right"
+    try:
+        batch_inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=use_truncation,
+            max_length=max_seq_len if use_truncation else None,
+        ).to(device)
+    finally:
+        tokenizer.padding_side = _orig_padding_side
+
+    # --- Forward pass (same 3-way dispatch as run_instance) ---
+    if forward_hidden_states_mode == "causal":
+        with torch.no_grad():
+            outputs = model(
+                input_ids=batch_inputs["input_ids"],
+                attention_mask=batch_inputs["attention_mask"],
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    elif forward_hidden_states_mode == "encoder_load_time":
+        with torch.no_grad():
+            outputs = model(**batch_inputs)
+    elif forward_hidden_states_mode == "encoder_inference":
+        with torch.no_grad():
+            outputs = model(
+                **batch_inputs,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+    else:
+        raise ValueError(
+            f"Unknown forward_hidden_states_mode: {forward_hidden_states_mode!r}. "
+            "Expected one of: 'causal', 'encoder_load_time', 'encoder_inference'."
+        )
+
+    # outputs.hidden_states is a tuple of length (num_layers + 1), each
+    # tensor of shape (batch_size, padded_seq_len, hidden_dim).
+    hidden_states_batched = outputs.hidden_states
+
+    # --- Per-board finalize ---
+    # `results` is aligned with the input `rows`: position i corresponds to
+    # rows[i]. Boards that were excluded at pre-forward get None.
+    results: List[Optional[Tuple[Dict, List[Dict], Optional[List[Dict]]]]] = [None] * len(rows)
+    for batch_position, original_idx in enumerate(active_indices):
+        state = per_board_state[original_idx]
+        assert state is not None  # active_indices only includes survivors
+        seq_len = token_lengths[batch_position]
+        # Slice each layer's tensor: [batch_position, :seq_len, :].
+        hidden_states_one_board = tuple(
+            hidden_states_batched[layer][batch_position, :seq_len, :]
+            for layer in range(num_layers + 1)
+        )
+
+        general_record, metrics_records, vector_records = _finalize_board(
+            hidden_states_one_board=hidden_states_one_board,
+            row_id=state["row_id"],
+            hint=state["hint"],
+            candidates=state["candidates"],
+            targets=state["targets"],
+            black=state["black"],
+            tan=state["tan"],
+            spans=state["spans"],
+            feature_markers=state["feature_markers"],
+            use_social_context=use_social_context,
+            permutation_id=permutation_ids[original_idx],
+            save_vectors=save_vectors_flags[original_idx],
+            prompt_token_count=state["prompt_token_count"],
+            truncated=state["truncated"],
+            giver_features=state["giver_features"],
+            pooling_methods=pooling_methods,
+            num_layers=num_layers,
+            use_truncation=use_truncation,
+            acceleration=acceleration,
+        )
+        results[original_idx] = (general_record, metrics_records, vector_records)
+
+    del outputs, hidden_states_batched, batch_inputs
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    return results  # type: ignore[return-value]
