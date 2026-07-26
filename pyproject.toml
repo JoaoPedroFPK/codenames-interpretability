@@ -42,6 +42,11 @@ viz = [
     "umap-learn==0.5.7",
     "adjusttext==1.3.0",
 ]
+# Tuned-lens translator training text (GPU stage only). Kept out of the core
+# pin set; verify Colab coexistence with `doctor` before a run.
+lens = [
+    "datasets==3.2.0",
+]
 
 [project.scripts]
 codenames-experiment = "codenames.cli:main"
@@ -49,3 +54,8 @@ codenames-experiment = "codenames.cli:main"
 [tool.setuptools.packages.find]
 include = ["codenames*"]
 exclude = ["notebooks*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "network: tests that download the tiny HF fixture model (cached after first run)",
+]
