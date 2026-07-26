@@ -12,6 +12,10 @@ Subcommands:
 - ``compare``:    reference path vs accelerated path, with per-column deltas
 - ``visualize``:  per-board heatmap / projection figures
 - ``aggregate``:  cross-model metric tables + publication figure set
+- ``lens-extract``: generating-position hidden-state dump (GPU; lens_spec.md)
+- ``lens-tune``:    tuned-lens translator training (GPU)
+- ``lens-apply``:   raw/tuned candidate scoring from the dump (offline)
+- ``lens-analyze``: pre-registered trajectory analysis + overlay figures
 
 Output of each subcommand is identical to running the corresponding cells of
 the model notebook in order; no extra logging, no progress suppression. All
@@ -933,6 +937,323 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Lens subcommands (lens_spec.md Draft v2)
+# ---------------------------------------------------------------------------
+
+# Registry keys of the causal decoders the lens instrument is defined for.
+_LENS_MODELS = ("mistral", "qwen", "qwen_random")
+# Registry key -> output prefix (matches each loader's metadata["prefix"]).
+_LENS_PREFIXES = {"mistral": "mistral", "qwen": "qwen",
+                  "qwen_random": "random_qwen"}
+# Registry key -> HF id whose tokenizer the offline stages load. lens-apply
+# never loads the 7B weights; the random-init decoder shares Qwen's tokenizer.
+_LENS_TOKENIZERS = {
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
+    "qwen": "Qwen/Qwen2.5-7B-Instruct",
+    "qwen_random": "Qwen/Qwen2.5-7B-Instruct",
+}
+# Registry key -> chat template strategy (matches loader metadata; kept here
+# so the offline stages don't need the loader).
+_LENS_CHAT_TEMPLATES = {"mistral": "mistral_inst", "qwen": "chatml",
+                        "qwen_random": "chatml"}
+
+
+def _require_lens_model(model: str) -> None:
+    if model not in _LENS_MODELS:
+        raise SystemExit(
+            f"lens commands are scoped to the causal decoders "
+            f"{', '.join(_LENS_MODELS)}; got --model {model!r}. Encoders "
+            f"have no next-token unembedding (lens_spec.md §10)."
+        )
+
+
+def _lens_resolve_contract(args, df) -> "object":
+    """--full > --sample-size > contract default, as in the run command."""
+    import dataclasses
+    from .contract import CONTRACT_V1
+
+    if args.full:
+        requested_n = len(df)
+        print(f"Run size: FULL dataset ({requested_n} boards)")
+    elif args.sample_size is not None:
+        requested_n = args.sample_size
+        print(f"Run size: {requested_n} boards (--sample-size)")
+    else:
+        requested_n = CONTRACT_V1.sample_size
+        print(f"Run size: {requested_n} boards (contract default)")
+    if requested_n != CONTRACT_V1.sample_size:
+        return dataclasses.replace(CONTRACT_V1, sample_size=requested_n)
+    return CONTRACT_V1
+
+
+def _make_lens_extract_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "lens-extract",
+        help="Dump per-layer hidden states at the generating position (GPU).",
+        description=(
+            "One forward pass per board (canonical ordering only). Writes a "
+            "fp16 memmap [N, layers+1, d], an index CSV, and the model's "
+            "readout weights. Resumable. lens_spec.md §5."
+        ),
+    )
+    p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("--output-dir", required=True,
+                   help="Model output dir, e.g. output/mistral_outputs.")
+    p.add_argument("--sample-size", type=int, default=None,
+                   help="Number of boards (default: contract N=2000).")
+    p.add_argument("--full", action="store_true",
+                   help="Run every board in the dataset.")
+    p.add_argument("--conditions", default="no_social,with_social",
+                   help="Comma-separated subset of: no_social,with_social.")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue an interrupted lens extraction.")
+    p.add_argument("--checkpoint-dir", default=None,
+                   help="Manifest dir (default: <output-dir>/checkpoints).")
+    p.add_argument("--flash-attn", action="store_true",
+                   help="Load trained models with flash_attention_2.")
+    return p
+
+
+def _make_lens_tune_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "lens-tune",
+        help="Train tuned-lens translators on generic text (GPU).",
+        description=(
+            "Per-layer affine trained to match the model's own final logits "
+            "(never the human labels). Saves {prefix}_lens_translators.npz. "
+            "lens_spec.md §6."
+        ),
+    )
+    p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
+    p.add_argument("--output-dir", required=True)
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--train-text", default=None,
+                     help="Plain-text file to train on.")
+    src.add_argument("--hf-dataset", default="wikitext/wikitext-103-raw-v1",
+                     help="HF dataset as name/config (needs the [lens] extra).")
+    p.add_argument("--steps", type=int, default=250)
+    p.add_argument("--seq-len", type=int, default=512)
+    p.add_argument("--max-chars", type=int, default=20_000_000,
+                   help="Character budget drawn from the training corpus.")
+    return p
+
+
+def _make_lens_apply_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "lens-apply",
+        help="Score candidates through raw + tuned lenses (offline, no GPU).",
+        description=(
+            "Reads the hidden dump + readout weights (+ translators if "
+            "present) and writes {prefix}_lens_scores_{mode}.parquet."
+        ),
+    )
+    p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--sample-size", type=int, default=None)
+    p.add_argument("--full", action="store_true")
+    p.add_argument("--conditions", default="no_social")
+    p.add_argument("--lenses", default="raw,tuned",
+                   help="Comma-separated subset of: raw,tuned.")
+    return p
+
+
+def _make_lens_analyze_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "lens-analyze",
+        help="Curves, decision rules, controls, overlay figures (offline).",
+        description=(
+            "Applies the pre-registered lens_spec.md §3 rules to saved "
+            "scores. NOTE: --models/--random-model take output PREFIXES "
+            "(mistral, qwen, random_qwen), not registry keys."
+        ),
+    )
+    p.add_argument("--output-root", default="output")
+    p.add_argument("--models", default="mistral,qwen")
+    p.add_argument("--random-model", default="random_qwen",
+                   help="Prefix of the random-init null, or 'none'.")
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--out-dir", default=os.path.join("output", "lens_analysis"))
+    p.add_argument("--figures-dir", default=os.path.join("visualization", "lens"))
+    p.add_argument("--n-boot", type=int, default=5000)
+    p.add_argument("--seed", type=int, default=2026)
+    return p
+
+
+def _cmd_lens_extract(args: argparse.Namespace) -> int:
+    from .data import load_dataset, sample_turns
+    from .lens.extract import run_lens_extraction
+
+    _require_lens_model(args.model)
+    df = load_dataset(args.dataset)
+    contract = _lens_resolve_contract(args, df)
+
+    loader = _resolve_loader(args.model)
+    if args.flash_attn and args.model in ("mistral", "qwen"):
+        print("Loading model with attn_implementation='flash_attention_2'")
+        model, tokenizer, meta = loader(attn_implementation="flash_attention_2")
+    else:
+        model, tokenizer, meta = loader()
+
+    df_sample = sample_turns(df, n=contract.sample_size,
+                             seed=contract.random_seed)
+    conditions = tuple(c.strip() for c in args.conditions.split(",") if c.strip())
+
+    run_lens_extraction(
+        model=model,
+        tokenizer=tokenizer,
+        df=df_sample,
+        base_dir=args.output_dir,
+        prefix=meta["prefix"],
+        contract=contract,
+        chat_template_strategy=meta["chat_template_strategy"],
+        num_layers=meta["num_layers"],
+        hidden_dim=meta["hidden_dim"],
+        conditions=conditions,
+        device=meta["device"],
+        resume=args.resume,
+        checkpoint_dir=args.checkpoint_dir,
+    )
+    return 0
+
+
+def _cmd_lens_tune(args: argparse.Namespace) -> int:
+    from .lens.tuned import TunedLensConfig, train_tuned_lens
+
+    _require_lens_model(args.model)
+
+    if args.train_text:
+        with open(args.train_text, "r", encoding="utf-8") as f:
+            texts = [f.read()[: args.max_chars]]
+    else:
+        try:
+            from datasets import load_dataset as hf_load_dataset
+        except ImportError as e:
+            raise SystemExit(
+                "lens-tune needs the [lens] extra for --hf-dataset "
+                "(pip install -e '.[lens]') or pass --train-text FILE."
+            ) from e
+        name, _, config = args.hf_dataset.partition("/")
+        ds = hf_load_dataset(name, config or None, split="train")
+        texts, total = [], 0
+        for rec in ds:
+            t = rec.get("text", "")
+            if t.strip():
+                texts.append(t)
+                total += len(t)
+            if total >= args.max_chars:
+                break
+
+    loader = _resolve_loader(args.model)
+    model, tokenizer, meta = loader()
+
+    cfg = TunedLensConfig(seq_len=args.seq_len, n_steps=args.steps)
+    lens = train_tuned_lens(model, tokenizer, texts, cfg)
+    os.makedirs(args.output_dir, exist_ok=True)
+    out = os.path.join(args.output_dir,
+                       f"{meta['prefix']}_lens_translators.npz")
+    lens.save(out)
+    print(f"Tuned-lens translators saved: {out} "
+          f"(final loss {lens.history[-1]:.4f})")
+    return 0
+
+
+def _cmd_lens_apply(args: argparse.Namespace) -> int:
+    from transformers import AutoTokenizer
+
+    from .data import load_dataset, sample_turns
+    from .lens.apply import compute_scores, load_readout, save_scores
+    from .lens.tuned import TunedLens
+
+    _require_lens_model(args.model)
+    prefix = _LENS_PREFIXES[args.model]
+    df = load_dataset(args.dataset)
+    contract = _lens_resolve_contract(args, df)
+    df_sample = sample_turns(df, n=contract.sample_size,
+                             seed=contract.random_seed)
+
+    tokenizer = AutoTokenizer.from_pretrained(_LENS_TOKENIZERS[args.model])
+    readout = load_readout(os.path.join(
+        args.output_dir, f"{prefix}_lens_readout_f16.npz"))
+
+    lenses = [x.strip() for x in args.lenses.split(",") if x.strip()]
+    translators = None
+    if "tuned" in lenses:
+        tpath = os.path.join(args.output_dir,
+                             f"{prefix}_lens_translators.npz")
+        if os.path.exists(tpath):
+            translators = TunedLens.load(tpath)
+        else:
+            print(f"  WARNING: {tpath} not found; skipping tuned lens "
+                  f"(run lens-tune first).")
+            lenses = [x for x in lenses if x != "tuned"]
+
+    for mode_name in (c.strip() for c in args.conditions.split(",")):
+        hidden = os.path.join(args.output_dir,
+                              f"{prefix}_lens_hidden_{mode_name}_f16.npy")
+        index = os.path.join(args.output_dir,
+                             f"{prefix}_lens_index_{mode_name}.csv")
+        if not os.path.exists(hidden):
+            print(f"  WARNING: no hidden dump for '{mode_name}' "
+                  f"({hidden}); skipping.")
+            continue
+        frames = []
+        if "raw" in lenses:
+            frames.append(compute_scores(hidden, index, df_sample,
+                                         tokenizer, readout, "raw"))
+        if translators is not None:
+            frames.append(compute_scores(hidden, index, df_sample,
+                                         tokenizer, readout, "tuned",
+                                         translators=translators))
+        if frames:
+            out = save_scores(frames, args.output_dir, prefix, mode_name)
+            print(f"  Scores saved: {out}")
+    return 0
+
+
+def _cmd_lens_analyze(args: argparse.Namespace) -> int:
+    from .lens.analysis import run_analysis
+    from .lens.figures import lens_overlay_figure
+
+    models = tuple(m.strip() for m in args.models.split(",") if m.strip())
+    random_model = None if args.random_model == "none" else args.random_model
+
+    summary = run_analysis(
+        output_root=args.output_root,
+        models=models,
+        random_model=random_model,
+        mode=args.condition,
+        out_dir=args.out_dir,
+        n_boot=args.n_boot,
+        seed=args.seed,
+    )
+
+    concordance_csv = os.path.join(args.output_root, "analysis",
+                                   "analysis_concordance_by_layer.csv")
+    curves_csv = os.path.join(args.out_dir,
+                              f"lens_curves_{args.condition}.csv")
+    if os.path.exists(curves_csv) and os.path.exists(concordance_csv):
+        all_curves = pd.read_csv(curves_csv)
+        random_curves = (
+            all_curves[all_curves["model"] == random_model]
+            if random_model is not None else None)
+        for m in models:
+            if m not in summary:
+                continue
+            gen_acc = summary[m]["calibration"]["generation_acc"]
+            out_path = os.path.join(args.figures_dir,
+                                    f"lens_overlay_{m}_{args.condition}.png")
+            lens_overlay_figure(
+                all_curves[all_curves["model"] == m], m, concordance_csv,
+                gen_acc, out_path, condition=args.condition,
+                random_curves=random_curves)
+            print(f"  Figure saved: {out_path}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="codenames-experiment",
@@ -950,6 +1271,10 @@ def main(argv=None) -> int:
     _make_sanity_parser(sp)
     _make_visualize_parser(sp)
     _make_aggregate_parser(sp)
+    _make_lens_extract_parser(sp)
+    _make_lens_tune_parser(sp)
+    _make_lens_apply_parser(sp)
+    _make_lens_analyze_parser(sp)
 
     args = parser.parse_args(argv)
 
@@ -969,6 +1294,14 @@ def main(argv=None) -> int:
         return _cmd_visualize(args)
     if args.command == "aggregate":
         return _cmd_aggregate(args)
+    if args.command == "lens-extract":
+        return _cmd_lens_extract(args)
+    if args.command == "lens-tune":
+        return _cmd_lens_tune(args)
+    if args.command == "lens-apply":
+        return _cmd_lens_apply(args)
+    if args.command == "lens-analyze":
+        return _cmd_lens_analyze(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
