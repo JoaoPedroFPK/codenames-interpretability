@@ -112,3 +112,26 @@ def test_trained_vs_random():
     m = trained_vs_random(trained, random)
     assert list(m["exceeds_random_ci"]) == [False, True, True]
     np.testing.assert_allclose(m["delta"], [-0.05, 0.15, 0.35])
+
+
+def test_overlay_figure_writes_file(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    from codenames.lens.figures import lens_overlay_figure
+
+    curves = pd.concat([
+        _curves([0.1, 0.3, 0.5, 0.55, 0.5, 0.45, 0.5, 0.6], lens="raw"),
+        _curves([0.2, 0.4, 0.55, 0.58, 0.56, 0.55, 0.58, 0.6], lens="tuned"),
+    ])
+    gcsv = tmp_path / "g.csv"
+    pd.DataFrame({
+        "model": "mistral", "condition": "no_social", "pooling": "mean",
+        "layer": range(8), "top1_accuracy": np.linspace(0.25, 0.15, 8),
+    }).to_csv(gcsv, index=False)
+    random_curves = _curves([0.24, 0.25, 0.26, 0.25, 0.24, 0.25, 0.26, 0.25],
+                            lens="tuned")
+    out = lens_overlay_figure(curves, "mistral", str(gcsv), 0.617,
+                              str(tmp_path / "overlay_mistral.png"),
+                              random_curves=random_curves)
+    import os
+    assert os.path.exists(out) and os.path.getsize(out) > 0
