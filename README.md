@@ -68,9 +68,10 @@ codenames-interpretability/
 │   ├── comparison.py, diagnostics.py, depcheck.py
 │   ├── persistence.py              # File I/O for CSV / parquet / NPZ
 │   ├── models/                     # One file per model: load_<name>()
+│   ├── lens/                       # Vocabulary-space lens pipeline (raw + tuned)
 │   ├── analysis/                   # Cross-model tables and the figure set
 │   └── viz/                        # Per-board heatmaps and 2D projections
-├── notebooks/                      # Thin per-model orchestration shells (01–07)
+├── notebooks/                      # Thin orchestration shells (01–07 per model, 08 lens)
 ├── pyproject.toml
 ├── LICENSE
 └── README.md
@@ -192,10 +193,31 @@ The lens pipeline (`docs/specs/lens_spec.md`) reads the model's own next-token c
 per layer at the generating position, restricted to the board candidates, to
 adjudicate whether the thesis's cosine–generation gap is metric blindness or
 representational decay. It is scoped to the causal decoders (`mistral`,
-`qwen`, `qwen_random`). The GPU stages run from `notebooks/08_lens.ipynb` on
-Colab (extraction ≈ 1.5–3 h per model-condition on an A100, tuned-lens
-training ≈ 1–2 h per model); `lens-apply` and `lens-analyze` then run locally
-on the downloaded dump:
+`qwen`, `qwen_random`).
+
+Two lens readouts are reported side by side as a deliberate bracket, not as
+competing instruments. The **raw logit lens** projects each layer's hidden
+state directly through the model's final LayerNorm and unembedding; it assumes
+every layer already writes in the final-layer basis, which fails at interior
+layers (especially under rotary position encodings) and so biases the measured
+emergence depth *late*. The **tuned lens** \[Belrose et al., 2023;
+reimplemented in `codenames/lens/tuned.py`\] first passes the hidden state
+through a per-layer affine translator, identity-initialised and trained on
+generic text to minimise the KL divergence between each layer's projected
+logits and the model's own final-layer logits. The translators never see the
+board data or the human labels — they learn to read the model's *own*
+prediction, not the task — but precisely because they are trained to match
+the final answer, they pull interior readouts toward it, biasing emergence
+*early* and potentially flattening a genuine dip. Neither lens is treated as
+ground truth: the raw–tuned pair brackets the true emergence depth, and
+trajectory claims rest on the shapes both readouts agree on. Translator
+training (`lens-tune`) is a GPU stage and needs the `[lens]` extra for its
+training corpus.
+
+The GPU stages run from `notebooks/08_lens.ipynb` on Colab (extraction
+≈ 1.5–3 h per model-condition on an A100, tuned-lens training ≈ 1–2 h per
+model); `lens-apply` and `lens-analyze` then run locally on the downloaded
+dump:
 
 ```
  COLAB A100 (notebooks/08_lens.ipynb)                LOCAL (CLI)
