@@ -151,6 +151,10 @@ Installing the package exposes `codenames-experiment`:
 | `doctor` | Verify installed dependencies match the pinned set |
 | `visualize` | Render per-board heatmaps and 2D projections (`[viz]` extra) |
 | `aggregate` | Build the cross-model tables and figure set (`[viz]` extra) |
+| `lens-extract` | Dump per-layer hidden states at the generating position (GPU) |
+| `lens-tune` | Train tuned-lens translators on generic text (GPU, `[lens]` extra) |
+| `lens-apply` | Score board candidates through the raw/tuned lens (offline) |
+| `lens-analyze` | Pre-registered lens trajectory analysis + overlay figures |
 
 A run checkpoints incrementally so a dead Colab runtime can be continued:
 
@@ -181,6 +185,39 @@ reference path for speed; each is quantified against the reference path by
 | `--vectorize-anisotropy` | Replace the O(n²) candidate-pair loop with a single matrix product |
 | `--flash-attn` | Load Mistral or Qwen with FlashAttention 2 (requires `flash_attn`) |
 | `--batch-size N` | Run N boards through one padded forward pass (default 1 = reference) |
+
+### Lens study (post-thesis extension)
+
+The lens pipeline (`docs/specs/lens_spec.md`) reads the model's own next-token channel
+per layer at the generating position, restricted to the board candidates, to
+adjudicate whether the thesis's cosine–generation gap is metric blindness or
+representational decay. It is scoped to the causal decoders (`mistral`,
+`qwen`, `qwen_random`). The GPU stages run from `notebooks/08_lens.ipynb` on
+Colab (extraction ≈ 1.5–3 h per model-condition on an A100, tuned-lens
+training ≈ 1–2 h per model); `lens-apply` and `lens-analyze` then run locally
+on the downloaded dump:
+
+```
+ COLAB A100 (notebooks/08_lens.ipynb)                LOCAL (CLI)
+ ┌──────────────────────────────────┐             ┌───────────────────────────────┐
+ │ lens-extract: 1 forward/board    │   Drive     │ lens-apply: raw + tuned       │
+ │  ─► hidden dump [N, layers+1, d] │  ────────►  │  scoring ─► scores parquet    │
+ │  ─► readout weights (LN + head)  │  download   │ lens-analyze: curves, rules,  │
+ │ lens-tune: per-layer translators │             │  controls, gate, figures      │
+ └──────────────────────────────────┘             └───────────────────────────────┘
+```
+
+```bash
+codenames-experiment lens-apply   --model mistral --dataset data/clue_generation.csv \
+    --output-dir output/mistral_outputs --full --conditions no_social
+codenames-experiment lens-analyze --output-root output \
+    --models mistral,qwen --random-model random_qwen --condition no_social
+```
+
+`lens-analyze` writes curves, the pre-registered decision table, controls,
+and per-model overlay figures under `output/lens_analysis/` and
+`visualization/lens/`. Interpret nothing before the calibration gate and the
+random-init null pass (see the notebook's closing notes).
 
 ### Aggregation and figures
 
