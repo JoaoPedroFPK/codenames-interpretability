@@ -1,4 +1,4 @@
-"""Candidate-restricted readout rule (lens_spec.md §5, pre-registered).
+"""Candidate-restricted readout rule (docs/specs/lens_spec.md §5, pre-registered).
 
 A candidate's score at a layer is the MAX over its surface variants of the
 logit of the variant's FIRST subword token. Variants mirror the generation

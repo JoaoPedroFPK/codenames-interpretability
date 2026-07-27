@@ -1,4 +1,4 @@
-"""Pre-registered lens analysis (lens_spec.md §3, §7).
+"""Pre-registered lens analysis (docs/specs/lens_spec.md §3, §7).
 
 Decision-rule constants are the §3 pre-registration; do not tune them
 against the data. The calibration check gates everything: if final-layer
@@ -256,6 +256,11 @@ def run_analysis(
 
         shuffles.append(shuffle_control(scores, seed=seed).assign(model=m))
         summary[m] = {"curves": curves, "calibration": calib}
+
+    if not all_curves:
+        print("  [lens-analyze] no lens scores found for any model — run "
+              "lens-extract and lens-apply first. Nothing written.")
+        return summary
 
     pd.concat(all_curves, ignore_index=True).to_csv(
         os.path.join(out_dir, f"lens_curves_{mode}.csv"), index=False)

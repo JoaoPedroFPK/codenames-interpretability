@@ -1,4 +1,4 @@
-"""Position-level GPU extraction (lens_spec.md §5).
+"""Position-level GPU extraction (docs/specs/lens_spec.md §5).
 
 One forward pass per board (canonical candidate ordering only — the lens
 study needs no shuffles and no generation). For each board, the per-layer

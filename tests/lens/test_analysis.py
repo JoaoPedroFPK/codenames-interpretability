@@ -135,3 +135,10 @@ def test_overlay_figure_writes_file(tmp_path):
                               random_curves=random_curves)
     import os
     assert os.path.exists(out) and os.path.getsize(out) > 0
+
+
+def test_run_analysis_without_scores_is_graceful(tmp_path):
+    from codenames.lens.analysis import run_analysis
+    out = run_analysis(output_root=str(tmp_path), models=("mistral",),
+                       random_model=None, out_dir=str(tmp_path / "an"))
+    assert out == {}

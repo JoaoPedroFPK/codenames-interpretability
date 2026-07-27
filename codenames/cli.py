@@ -12,7 +12,7 @@ Subcommands:
 - ``compare``:    reference path vs accelerated path, with per-column deltas
 - ``visualize``:  per-board heatmap / projection figures
 - ``aggregate``:  cross-model metric tables + publication figure set
-- ``lens-extract``: generating-position hidden-state dump (GPU; lens_spec.md)
+- ``lens-extract``: generating-position hidden-state dump (GPU; docs/specs/lens_spec.md)
 - ``lens-tune``:    tuned-lens translator training (GPU)
 - ``lens-apply``:   raw/tuned candidate scoring from the dump (offline)
 - ``lens-analyze``: pre-registered trajectory analysis + overlay figures
@@ -938,7 +938,7 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Lens subcommands (lens_spec.md Draft v2)
+# Lens subcommands (docs/specs/lens_spec.md Draft v2)
 # ---------------------------------------------------------------------------
 
 # Registry keys of the causal decoders the lens instrument is defined for.
@@ -964,7 +964,7 @@ def _require_lens_model(model: str) -> None:
         raise SystemExit(
             f"lens commands are scoped to the causal decoders "
             f"{', '.join(_LENS_MODELS)}; got --model {model!r}. Encoders "
-            f"have no next-token unembedding (lens_spec.md §10)."
+            f"have no next-token unembedding (docs/specs/lens_spec.md §10)."
         )
 
 
@@ -994,7 +994,7 @@ def _make_lens_extract_parser(sp) -> argparse.ArgumentParser:
         description=(
             "One forward pass per board (canonical ordering only). Writes a "
             "fp16 memmap [N, layers+1, d], an index CSV, and the model's "
-            "readout weights. Resumable. lens_spec.md §5."
+            "readout weights. Resumable. docs/specs/lens_spec.md §5."
         ),
     )
     p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
@@ -1023,7 +1023,7 @@ def _make_lens_tune_parser(sp) -> argparse.ArgumentParser:
         description=(
             "Per-layer affine trained to match the model's own final logits "
             "(never the human labels). Saves {prefix}_lens_translators.npz. "
-            "lens_spec.md §6."
+            "docs/specs/lens_spec.md §6."
         ),
     )
     p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
@@ -1065,7 +1065,7 @@ def _make_lens_analyze_parser(sp) -> argparse.ArgumentParser:
         "lens-analyze",
         help="Curves, decision rules, controls, overlay figures (offline).",
         description=(
-            "Applies the pre-registered lens_spec.md §3 rules to saved "
+            "Applies the pre-registered docs/specs/lens_spec.md §3 rules to saved "
             "scores. NOTE: --models/--random-model take output PREFIXES "
             "(mistral, qwen, random_qwen), not registry keys."
         ),
