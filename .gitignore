@@ -35,9 +35,6 @@ ENV/
 # Jupyter
 .ipynb_checkpoints/
 
-# Editor / agent tooling
-.claude/
-
 # Local output data from experiments, not to be committed
 /output
 
