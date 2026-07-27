@@ -56,3 +56,5 @@ TCC.pdf
 client_secret.json
 client_secret_*.json
 token.json
+
+*.md
