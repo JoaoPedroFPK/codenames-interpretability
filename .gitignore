@@ -47,7 +47,7 @@ ENV/
 /umap.png
 
 # Thesis PDF — distributed separately, not committed
-TCC.pdf
+Codenames-Research.pdf
 
 # Credentials
 client_secret.json
