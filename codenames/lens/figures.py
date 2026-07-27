@@ -1,14 +1,18 @@
 """Overlay figure: lens bracket vs cosine geometry vs generation.
 
-One axes per model. Solid line = tuned lens (with bootstrap CI band),
-dotted = raw lens, grey dashed = the thesis geometric top-1 curve g(l)
-with its two humps marked, horizontal line = generation accuracy, optional
-thin dashed line = the random-init null. Colours follow
+Two panels sharing the layer axis. Top: solid line = tuned lens (with
+bootstrap CI band), dotted = raw lens, grey dashed = the thesis geometric
+top-1 curve g(l) with its two humps marked, horizontal line = generation
+accuracy, optional thin dashed line = the random-init null. Bottom:
+per-layer divergence L(l) - g(l) for both lenses with the bracket between
+them filled, and sign-consistent dissociation regions shaded ("geometry
+without decodability" / "decodability without geometry"). The bottom panel
+is skipped when the model has no geometric curve. Colours follow
 codenames.analysis.figures.MODEL_STYLE so the paper reads as one system.
 """
 
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,6 +21,8 @@ from ..analysis.figures import MODEL_STYLE, _FALLBACK_STYLE
 from ..viz.style import apply_publication_style, save_figure
 
 _GEO_COLOR = "#999999"
+_BELOW_TINT = "#e9dfd5"   # geometry without decodability (early hump)
+_ABOVE_TINT = "#d8e6dd"   # decodability without geometry (late stack)
 
 
 def _local_maxima(y: np.ndarray) -> np.ndarray:
@@ -30,23 +36,61 @@ def _local_maxima(y: np.ndarray) -> np.ndarray:
     return np.asarray(idx, dtype=int)
 
 
-def lens_overlay_figure(
+def _runs(mask: np.ndarray, min_run: int) -> List[Tuple[int, int]]:
+    """Inclusive (start, end) index runs of True at least min_run long."""
+    runs, start = [], None
+    for i, m in enumerate(mask):
+        if m and start is None:
+            start = i
+        elif not m and start is not None:
+            if i - start >= min_run:
+                runs.append((start, i - 1))
+            start = None
+    if start is not None and len(mask) - start >= min_run:
+        runs.append((start, len(mask) - 1))
+    return runs
+
+
+def _dissociation_regions(diff_raw: np.ndarray, diff_tuned: np.ndarray,
+                          min_run: int = 3):
+    """Layer-index runs where BOTH lenses sit on the same side of g(l).
+
+    Returns (below, above): below = geometry without decodability,
+    above = decodability without geometry. Runs shorter than min_run are
+    dropped; layers where the bracket straddles zero belong to neither.
+    """
+    below = _runs((np.maximum(diff_raw, diff_tuned) < 0), min_run)
+    above = _runs((np.minimum(diff_raw, diff_tuned) > 0), min_run)
+    return below, above
+
+
+def build_lens_overlay_figure(
     curves: pd.DataFrame,
     model_key: str,
     concordance_csv: str,
     generation_acc: float,
-    out_path: str,
     condition: str = "no_social",
     pooling: str = "mean",
     random_curves: Optional[pd.DataFrame] = None,
-) -> str:
+):
+    """Build the (1- or 2-panel) overlay figure and return it unsaved."""
     import matplotlib.pyplot as plt
 
     apply_publication_style()
     style = MODEL_STYLE.get(model_key, _FALLBACK_STYLE)
     color = style["color"]
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.2))
+    g = pd.read_csv(concordance_csv)
+    g = g[(g["model"] == model_key) & (g["condition"] == condition)
+          & (g["pooling"] == pooling)].sort_values("layer")
+
+    if len(g):
+        fig, (ax, ax_d) = plt.subplots(
+            2, 1, figsize=(5.5, 4.6), sharex=True,
+            gridspec_kw={"height_ratios": [1.0, 0.6]})
+    else:
+        fig, ax = plt.subplots(figsize=(5.5, 3.2))
+        ax_d = None
 
     for lens, ls, alpha in (("tuned", "-", 1.0), ("raw", ":", 0.9)):
         c = curves[curves["lens"] == lens].sort_values("layer")
@@ -59,9 +103,6 @@ def lens_overlay_figure(
             ax.fill_between(c["layer"], c["ci_lo"], c["ci_hi"],
                             color=color, alpha=0.15, linewidth=0)
 
-    g = pd.read_csv(concordance_csv)
-    g = g[(g["model"] == model_key) & (g["condition"] == condition)
-          & (g["pooling"] == pooling)].sort_values("layer")
     if len(g):
         y = g["top1_accuracy"].to_numpy()
         ax.plot(g["layer"], y, "--", color=_GEO_COLOR,
@@ -84,14 +125,73 @@ def lens_overlay_figure(
     ax.text(0.99, generation_acc, "generation", transform=ax.get_yaxis_transform(),
             ha="right", va="bottom", fontsize=7, color=color, alpha=0.8)
 
-    ax.set_xlabel("Layer")
     ax.set_ylabel("Candidate-restricted top-1 accuracy")
     ax.set_ylim(bottom=0)
     ax.set_title(f"{style.get('label', model_key)} — vocabulary channel "
                  f"vs cosine geometry ({condition})", fontsize=9)
     ax.legend(fontsize=7, frameon=False)
-    fig.tight_layout()
 
+    if ax_d is not None:
+        geo = g.set_index("layer")["top1_accuracy"]
+        diffs = {}
+        for lens in ("raw", "tuned"):
+            c = curves[curves["lens"] == lens].sort_values("layer")
+            if len(c):
+                d = c.set_index("layer")["top1"] - geo
+                diffs[lens] = d.dropna()
+        common = None
+        for d in diffs.values():
+            common = d.index if common is None else common.intersection(d.index)
+        if diffs and len(common):
+            layers = common.to_numpy()
+            d_raw = diffs.get("raw", diffs.get("tuned")).loc[common].to_numpy()
+            d_tuned = diffs.get("tuned", diffs.get("raw")).loc[common].to_numpy()
+
+            below, above = _dissociation_regions(d_raw, d_tuned)
+            for runs, tint, label, va, ypos in (
+                    (below, _BELOW_TINT, "geometry without\ndecodability",
+                     "bottom", 0.05),
+                    (above, _ABOVE_TINT, "decodability without\ngeometry",
+                     "top", 0.95)):
+                for start, end in runs:
+                    ax_d.axvspan(layers[start] - 0.5, layers[end] + 0.5,
+                                 color=tint, alpha=0.6, linewidth=0)
+                if runs:
+                    start, end = max(runs, key=lambda r: r[1] - r[0])
+                    ax_d.text((layers[start] + layers[end]) / 2.0, ypos, label,
+                              transform=ax_d.get_xaxis_transform(),
+                              ha="center", va=va, fontsize=6.5,
+                              color="#666666")
+
+            ax_d.fill_between(layers, d_raw, d_tuned, color=color,
+                              alpha=0.15, linewidth=0)
+            ax_d.plot(layers, d_tuned, "-", color=color, linewidth=1.0)
+            ax_d.plot(layers, d_raw, ":", color=color, linewidth=1.0)
+            ax_d.axhline(0.0, color=_GEO_COLOR, linewidth=0.8)
+        ax_d.set_ylabel("$L(\\ell) - g(\\ell)$", fontsize=8)
+        ax_d.set_xlabel("Layer")
+    else:
+        ax.set_xlabel("Layer")
+
+    fig.tight_layout()
+    return fig
+
+
+def lens_overlay_figure(
+    curves: pd.DataFrame,
+    model_key: str,
+    concordance_csv: str,
+    generation_acc: float,
+    out_path: str,
+    condition: str = "no_social",
+    pooling: str = "mean",
+    random_curves: Optional[pd.DataFrame] = None,
+) -> str:
+    import matplotlib.pyplot as plt
+
+    fig = build_lens_overlay_figure(
+        curves, model_key, concordance_csv, generation_acc,
+        condition=condition, pooling=pooling, random_curves=random_curves)
     base, ext = os.path.splitext(out_path)
     save_figure(fig, base, formats=("pdf", "png"))
     plt.close(fig)

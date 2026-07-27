@@ -77,20 +77,56 @@ def test_layer_curves_and_shuffle_chance_level():
 
 
 def test_calibration_check(tmp_path):
+    """§3 amended gate: computed on the word-first subsample only; the
+    full-sample agreement is kept as a descriptive statistic."""
     scores = _toy_scores()
     final = scores[scores["layer"] == 2]
-    top = final[final["rank"] == 1][["row_id", "word"]]
+    top = final[final["rank"] == 1][["row_id", "word"]].reset_index(drop=True)
+    words, texts = [], []
+    for i, w in enumerate(top["word"].values):
+        if i % 2 == 0:                       # word-first, agrees with lens
+            words.append(w)
+            texts.append(f'"{w}" is my clue.')
+        else:                                # scaffolded, disagrees
+            other = "a" if w != "a" else "b"
+            words.append(other)
+            texts.append(f'The word that best matches is "{other}".')
     gen = pd.DataFrame({
         "row_id": top["row_id"].values,
-        "generated_word": top["word"].values,       # perfect agreement
+        "generated_text": texts,
+        "generated_word": words,
         "generated_in_candidates": True,
-        "generated_correct": (top["word"] == "a").values,
+        "generated_correct": [w == "a" for w in words],
     })
     gcsv = str(tmp_path / "gen.csv")
     gen.to_csv(gcsv, index=False)
     r = calibration_check(scores, gcsv)
-    assert r["agreement"] == 1.0
     assert r["n_parseable"] == 20
+    assert r["n_word_first"] == 10
+    assert r["word_first_agreement"] == 1.0
+    assert r["agreement"] == 0.5
+    assert r["passes_gate"] is True          # gated on word-first only
+
+
+def test_calibration_check_word_first_failure(tmp_path):
+    """A word-first disagreement is a real pipeline defect -> gate fails."""
+    scores = _toy_scores()
+    final = scores[scores["layer"] == 2]
+    top = final[final["rank"] == 1][["row_id", "word"]].reset_index(drop=True)
+    wrong = ["a" if w != "a" else "b" for w in top["word"].values]
+    gen = pd.DataFrame({
+        "row_id": top["row_id"].values,
+        "generated_text": [f"{w} is my clue." for w in wrong],
+        "generated_word": wrong,
+        "generated_in_candidates": True,
+        "generated_correct": [w == "a" for w in wrong],
+    })
+    gcsv = str(tmp_path / "gen.csv")
+    gen.to_csv(gcsv, index=False)
+    r = calibration_check(scores, gcsv)
+    assert r["n_word_first"] == 20
+    assert r["word_first_agreement"] == 0.0
+    assert r["passes_gate"] is False
 
 
 def test_spearman_vs_geometric(tmp_path):
@@ -135,6 +171,56 @@ def test_overlay_figure_writes_file(tmp_path):
                               random_curves=random_curves)
     import os
     assert os.path.exists(out) and os.path.getsize(out) > 0
+
+
+def test_overlay_has_dissociation_panel_with_geometry(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    from codenames.lens.figures import build_lens_overlay_figure
+
+    curves = pd.concat([
+        _curves([0.1, 0.3, 0.5, 0.55, 0.5, 0.45, 0.5, 0.6], lens="raw"),
+        _curves([0.2, 0.4, 0.55, 0.58, 0.56, 0.55, 0.58, 0.6], lens="tuned"),
+    ])
+    gcsv = tmp_path / "g.csv"
+    pd.DataFrame({
+        "model": "mistral", "condition": "no_social", "pooling": "mean",
+        "layer": range(8), "top1_accuracy": np.linspace(0.25, 0.15, 8),
+    }).to_csv(gcsv, index=False)
+    fig = build_lens_overlay_figure(curves, "mistral", str(gcsv), 0.617)
+    assert len(fig.axes) == 2          # overlay + divergence panel
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_overlay_falls_back_to_single_panel_without_geometry(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    from codenames.lens.figures import build_lens_overlay_figure
+
+    curves = _curves([0.1, 0.3, 0.5, 0.55, 0.5, 0.45, 0.5, 0.6], lens="raw")
+    gcsv = tmp_path / "g.csv"
+    pd.DataFrame({
+        "model": "qwen", "condition": "no_social", "pooling": "mean",
+        "layer": range(8), "top1_accuracy": np.linspace(0.25, 0.15, 8),
+    }).to_csv(gcsv, index=False)   # no rows for 'mistral'
+    fig = build_lens_overlay_figure(curves, "mistral", str(gcsv), 0.617)
+    assert len(fig.axes) == 1          # graceful single-panel fallback
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_dissociation_regions():
+    from codenames.lens.figures import _dissociation_regions
+    # both lenses below geometry for 4 layers, straddle, then both above 3
+    diff_raw = np.array([-0.3, -0.3, -0.2, -0.1, 0.05, 0.2, 0.25, 0.3])
+    diff_tuned = np.array([-0.4, -0.35, -0.25, -0.15, -0.05, 0.1, 0.2, 0.3])
+    below, above = _dissociation_regions(diff_raw, diff_tuned, min_run=3)
+    assert below == [(0, 3)]
+    assert above == [(5, 7)]
+    # runs shorter than min_run are dropped
+    below, above = _dissociation_regions(diff_raw, diff_tuned, min_run=5)
+    assert below == [] and above == []
 
 
 def test_run_analysis_without_scores_is_graceful(tmp_path):

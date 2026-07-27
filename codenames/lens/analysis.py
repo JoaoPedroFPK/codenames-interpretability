@@ -127,6 +127,11 @@ def shuffle_control(scores: pd.DataFrame, n_perm: int = 100,
 
 
 def calibration_check(scores: pd.DataFrame, generation_csv: str) -> Dict:
+    """§3 (amended 2026-07-27): the output-channel identity only covers
+    generations that open with the parsed word; scaffolded generations
+    ("The word that best matches ... is X") place the word past the dumped
+    position, so the gate uses the word-first subsample and the full-sample
+    agreement is descriptive only."""
     gen = pd.read_csv(generation_csv)
     gen = gen[gen["generated_in_candidates"] == True]  # noqa: E712
     final_layer = int(scores["layer"].max())
@@ -134,12 +139,21 @@ def calibration_check(scores: pd.DataFrame, generation_csv: str) -> Dict:
                  & (scores["layer"] == final_layer)
                  & (scores["rank"] == 1)][["row_id", "word", "word_type"]]
     merged = gen.merge(top, on="row_id", how="inner")
-    agreement = float((merged["generated_word"].str.lower()
-                       == merged["word"].str.lower()).mean())
-    return {"agreement": agreement, "n_parseable": int(len(merged)),
+    agree = (merged["generated_word"].str.lower()
+             == merged["word"].str.lower())
+    word_first = merged.apply(
+        lambda r: str(r["generated_text"]).lstrip().lstrip("\"'`")
+        .lower().startswith(str(r["generated_word"]).lower()), axis=1)
+    wf_agreement = (float(agree[word_first].mean())
+                    if word_first.any() else float("nan"))
+    return {"agreement": float(agree.mean()),
+            "n_parseable": int(len(merged)),
+            "word_first_agreement": wf_agreement,
+            "n_word_first": int(word_first.sum()),
             "lens_top1_final": float((top["word_type"] == "target").mean()),
             "generation_acc": float(gen["generated_correct"].mean()),
-            "passes_gate": agreement >= CALIBRATION_GATE}
+            "passes_gate": bool(word_first.any()
+                                and wf_agreement >= CALIBRATION_GATE)}
 
 
 def spearman_vs_geometric(curves: pd.DataFrame, lens: str,
@@ -233,12 +247,15 @@ def run_analysis(
         calib = (calibration_check(scores, gen_csv)
                  if os.path.exists(gen_csv) else
                  {"agreement": np.nan, "n_parseable": 0,
+                  "word_first_agreement": np.nan, "n_word_first": 0,
                   "lens_top1_final": np.nan, "generation_acc": np.nan,
                   "passes_gate": False})
         calibrations.append({"model": m, **calib})
         if not calib["passes_gate"]:
             print(f"  WARNING: calibration gate FAILED for '{m}' "
-                  f"(agreement={calib['agreement']}); downstream claims "
+                  f"(word-first agreement="
+                  f"{calib['word_first_agreement']} on "
+                  f"n={calib['n_word_first']}); downstream claims "
                   f"for this model are BLOCKED (lens_spec §3).")
 
         for lens in scores["lens"].unique():
