@@ -1033,7 +1033,7 @@ def _make_lens_tune_parser(sp) -> argparse.ArgumentParser:
                      help="Plain-text file to train on.")
     src.add_argument("--hf-dataset", default="wikitext/wikitext-103-raw-v1",
                      help="HF dataset as name/config (needs the [lens] extra).")
-    p.add_argument("--steps", type=int, default=250)
+    p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--max-chars", type=int, default=20_000_000,
                    help="Character budget drawn from the training corpus.")
@@ -1156,8 +1156,10 @@ def _cmd_lens_tune(args: argparse.Namespace) -> int:
     out = os.path.join(args.output_dir,
                        f"{meta['prefix']}_lens_translators.npz")
     lens.save(out)
+    val_msg = (f", final val KL {lens.val_history[-1]:.4f}"
+               if lens.val_history else "")
     print(f"Tuned-lens translators saved: {out} "
-          f"(final loss {lens.history[-1]:.4f})")
+          f"(final loss {lens.history[-1]:.4f}{val_msg})")
     return 0
 
 

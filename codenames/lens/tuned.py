@@ -3,8 +3,13 @@
 Per-layer affine (A_l, b_l), identity-initialised, trained to minimise
 KL(final logits ‖ Unembed(FinalLN(A_l h_l + b_l))) on generic text — the
 translators match the model's OWN final prediction and never see the human
-labels (lens_spec §6/§9 no-leakage argument). Kept in-repo (~100 lines of
-torch) so the pinned Colab stack gains no new heavyweight dependency.
+labels (lens_spec §6/§9 no-leakage argument). The optimiser learns the
+deviation D_l = A_l - I, so AdamW's weight decay regularises toward the
+identity (a no-op translator), never toward the zero matrix. Loss values
+are mean per-position KL in nats, averaged over layers; a held-out chunk
+split tracks validation KL for convergence checks. Kept in-repo (~100
+lines of torch) so the pinned Colab stack gains no new heavyweight
+dependency.
 """
 
 from dataclasses import dataclass, field
@@ -18,11 +23,13 @@ import torch.nn.functional as F
 @dataclass
 class TunedLensConfig:
     seq_len: int = 512
-    n_steps: int = 250
+    n_steps: int = 1000
     seqs_per_step: int = 4
     positions_per_seq: int = 64
     lr: float = 1e-3
     weight_decay: float = 1e-3
+    val_every: int = 25
+    val_seqs: int = 8
     seed: int = 2026
 
 
@@ -31,16 +38,21 @@ class TunedLens:
     A: np.ndarray            # [L, d, d] fp32
     b: np.ndarray            # [L, d]   fp32
     history: List[float] = field(default_factory=list)
+    val_history: List[float] = field(default_factory=list)
 
     def save(self, path: str) -> None:
-        np.savez_compressed(path, A=self.A, b=self.b,
-                            history=np.asarray(self.history, dtype=np.float64))
+        np.savez_compressed(
+            path, A=self.A, b=self.b,
+            history=np.asarray(self.history, dtype=np.float64),
+            val_history=np.asarray(self.val_history, dtype=np.float64))
 
     @classmethod
     def load(cls, path: str) -> "TunedLens":
         z = np.load(path)
         return cls(A=z["A"].astype(np.float32), b=z["b"].astype(np.float32),
-                   history=list(z["history"]))
+                   history=list(z["history"]),
+                   val_history=list(z["val_history"])
+                   if "val_history" in z.files else [])
 
     def translate(self, H: np.ndarray, layer: int) -> np.ndarray:
         if layer >= self.A.shape[0]:      # final hidden state: identity
@@ -69,47 +81,71 @@ def train_tuned_lens(model, tokenizer, texts, config: TunedLensConfig,
     norm = model.base_model.norm
     lm_head = model.get_output_embeddings()
 
-    A = torch.stack([torch.eye(d) for _ in range(L)]).to(device) \
-        .requires_grad_(True)
+    # A_l = I + D_l: learning the deviation makes AdamW's decay-toward-zero
+    # act as decay-toward-identity on the translator.
+    D = torch.zeros(L, d, d, device=device, requires_grad=True)
     b = torch.zeros(L, d, device=device, requires_grad=True)
-    opt = torch.optim.AdamW([A, b], lr=config.lr,
+    opt = torch.optim.AdamW([D, b], lr=config.lr,
                             weight_decay=config.weight_decay)
 
     chunks = _chunk_token_ids(tokenizer, texts, config.seq_len, config.seed)
     if len(chunks) == 0:
         raise ValueError("Training texts produced zero full-length chunks.")
+    n_val = min(config.val_seqs, len(chunks) // 10)
+    val_chunks, chunks = chunks[:n_val], chunks[n_val:]
+    if len(chunks) == 0:
+        raise ValueError("Training texts produced no chunks after the "
+                         "validation split.")
     rng = np.random.default_rng(config.seed)
     history: List[float] = []
+    val_history: List[float] = []
+
+    def _mean_kl(input_ids, pos):
+        """Mean per-position KL(final ‖ lens), averaged over layers."""
+        with torch.no_grad():
+            out = model(input_ids=input_ids, output_hidden_states=True,
+                        return_dict=True)
+        teacher = F.log_softmax(
+            out.logits[:, pos, :].float(), dim=-1).detach()      # [B, P, V]
+        teacher = teacher.reshape(-1, teacher.shape[-1])         # [B*P, V]
+        loss = torch.zeros((), device=device)
+        for layer in range(L):
+            h = out.hidden_states[layer][:, pos, :].float().detach()
+            translated = h + h @ D[layer].T + b[layer]
+            student = F.log_softmax(
+                lm_head(norm(translated.to(norm.weight.dtype))).float(),
+                dim=-1).reshape(-1, teacher.shape[-1])
+            loss = loss + F.kl_div(student, teacher, log_target=True,
+                                   reduction="batchmean")
+        return loss / L
 
     for step in range(config.n_steps):
         batch = chunks[rng.integers(0, len(chunks),
                                     size=config.seqs_per_step)]
         input_ids = torch.tensor(batch, dtype=torch.long, device=device)
-        with torch.no_grad():
-            out = model(input_ids=input_ids, output_hidden_states=True,
-                        return_dict=True)
         pos = rng.integers(1, config.seq_len,
                            size=min(config.positions_per_seq, config.seq_len - 1))
-        teacher = F.log_softmax(
-            out.logits[:, pos, :].float(), dim=-1).detach()      # [B, P, V]
-
-        loss = torch.zeros((), device=device)
-        for layer in range(L):
-            h = out.hidden_states[layer][:, pos, :].float().detach()
-            student = F.log_softmax(
-                lm_head(norm((h @ A[layer].T + b[layer])
-                             .to(norm.weight.dtype))).float(), dim=-1)
-            loss = loss + F.kl_div(student, teacher, log_target=True,
-                                   reduction="batchmean")
-        loss = loss / L
+        loss = _mean_kl(input_ids, pos)
         opt.zero_grad()
         loss.backward()
         opt.step()
         history.append(float(loss.detach().cpu()))
-        if (step + 1) % 25 == 0:
-            print(f"  tuned-lens step {step + 1}/{config.n_steps} "
-                  f"loss={history[-1]:.4f}")
 
-    return TunedLens(A=A.detach().cpu().numpy().astype(np.float32),
+        last = step + 1 == config.n_steps
+        if n_val and (last or (step + 1) % config.val_every == 0):
+            val_ids = torch.tensor(val_chunks, dtype=torch.long,
+                                   device=device)
+            val_pos = np.arange(1, config.seq_len,
+                                max(1, (config.seq_len - 1)
+                                    // config.positions_per_seq))
+            with torch.no_grad():
+                val_history.append(float(_mean_kl(val_ids, val_pos).cpu()))
+        if last or (step + 1) % 25 == 0:
+            val_msg = (f" val={val_history[-1]:.4f}" if val_history else "")
+            print(f"  tuned-lens step {step + 1}/{config.n_steps} "
+                  f"loss={history[-1]:.4f}{val_msg}")
+
+    eye = np.eye(d, dtype=np.float32)[None, :, :]
+    return TunedLens(A=(D.detach().cpu().numpy() + eye).astype(np.float32),
                      b=b.detach().cpu().numpy().astype(np.float32),
-                     history=history)
+                     history=history, val_history=val_history)
