@@ -1,0 +1,108 @@
+"""Symmetric-counterfactual donor construction (causal_spec.md §5A).
+
+A donor hint H' is valid for a turn on board B when H' own true target is a
+word ON B that does not overlap the clean turn's targets. The corrupted run is
+then a valid clean run for a DIFFERENT answer, which is what makes the logit
+difference of §3.2 well defined at both ends. Donors are additionally
+constrained to equal hint token count so clean and corrupted runs share a
+position indexing (§5A alignment rule); measured cost is 5 turns in 7,703.
+
+The rejected alternative, an unconstrained hint from any other turn, points at
+nothing on B: the corrupted run is degenerate rather than counterfactual and
+the §3.2 denominator is undefined.
+"""
+
+from collections import defaultdict
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
+import pandas as pd
+
+
+def build_donor_index(targets: Dict[int, Sequence[str]]) -> Dict[str, List[int]]:
+    """Map each target word to the turns whose true target set contains it."""
+    index: Dict[str, List[int]] = defaultdict(list)
+    for row_id, words in targets.items():
+        for word in words:
+            index[word].append(int(row_id))
+    return {word: sorted(rows) for word, rows in index.items()}
+
+
+def donors_for_turn(
+    *,
+    row_id: int,
+    candidates: Sequence[str],
+    targets: Sequence[str],
+    donor_index: Dict[str, List[int]],
+    hint_tokens: Dict[int, int],
+    donor_targets: Optional[Dict[int, Sequence[str]]] = None,
+    match_length: bool = True,
+) -> List[int]:
+    """Turns whose hint is a valid symmetric counterfactual for this turn."""
+    own = set(targets)
+    board = set(candidates)
+    out = set()
+    for word in board - own:
+        for donor in donor_index.get(word, ()):
+            if donor == row_id:
+                continue
+            if donor_targets is not None:
+                donor_words = set(donor_targets.get(donor, ()))
+                if not donor_words or not donor_words <= board or donor_words & own:
+                    continue
+            if match_length and hint_tokens.get(donor) != hint_tokens.get(row_id):
+                continue
+            out.add(donor)
+    return sorted(out)
+
+
+def build_pair_table(
+    df_sample: pd.DataFrame,
+    hint_tokens: Dict[int, int],
+    *,
+    seed: int = 2026,
+    match_length: bool = True,
+) -> pd.DataFrame:
+    """One (clean, donor) pair per turn. Turns with no valid donor are dropped.
+
+    ``hint_tokens`` maps row_id to hint token count and is supplied by the
+    caller, since it depends on the model's tokenizer and is not a dataset
+    column.
+    """
+    targets = {int(r.row_id): list(r.targets) for r in df_sample.itertuples()}
+    boards = {int(r.row_id): list(r.candidates) for r in df_sample.itertuples()}
+    hints = {int(r.row_id): r.hint for r in df_sample.itertuples()}
+    index = build_donor_index(targets)
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for row_id in sorted(targets):
+        donors = donors_for_turn(
+            row_id=row_id,
+            candidates=boards[row_id],
+            targets=targets[row_id],
+            donor_index=index,
+            hint_tokens=hint_tokens,
+            donor_targets=targets,
+            match_length=match_length,
+        )
+        if not donors:
+            continue
+        donor = int(donors[rng.integers(len(donors))])
+        rows.append(
+            {
+                "row_id": row_id,
+                "donor_row_id": donor,
+                "clean_target": targets[row_id][0],
+                "donor_target": targets[donor][0],
+                "hint": hints[row_id],
+                "donor_hint": hints[donor],
+                "n_donors": len(donors),
+            }
+        )
+
+    columns = [
+        "row_id", "donor_row_id", "clean_target", "donor_target",
+        "hint", "donor_hint", "n_donors",
+    ]
+    return pd.DataFrame(rows, columns=columns).reset_index(drop=True)
