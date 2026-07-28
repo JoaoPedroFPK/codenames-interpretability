@@ -183,9 +183,22 @@ def run_pilot(
     e_full, e_null, attribution_pairs = [], [], []
     started, forwards = time.perf_counter(), 0
 
+    misaligned = 0
     for pair in pairs.itertuples():
         clean_prompt = _prompt(pair.row_id, pair.hint)
         corrupt_prompt = _prompt(pair.row_id, pair.donor_hint)
+
+        # Equal STANDALONE hint token counts (the pairs.py pre-filter) do not
+        # guarantee equal PROMPT token counts: a hint tokenises differently in
+        # context. Patching (layer, position) across different-length sequences
+        # is undefined, so drop and count rather than crash or silently
+        # mis-index. Same rule as extract.run_corrupted_extraction.
+        n_clean = len(tokenizer.encode(clean_prompt, add_special_tokens=False))
+        n_corrupt = len(tokenizer.encode(corrupt_prompt, add_special_tokens=False))
+        if n_clean != n_corrupt:
+            misaligned += 1
+            continue
+
         table = build_token_table(tokenizer, list(by_id.loc[pair.row_id, "candidates"]))
 
         # --- P1: does p* land on the recorded generated token?
@@ -299,7 +312,16 @@ def run_pilot(
         "P7_finite": bool(np.isfinite(np.array(e_full, dtype=float)).all()),
         "P8_fwd_per_s": forwards / elapsed,
         "n_pairs": int(len(pairs)),
+        "n_measured": int(len(e_full)),
+        "n_misaligned_dropped": int(misaligned),
+        "alignment_yield": float(1.0 - misaligned / len(pairs)) if len(pairs) else 0.0,
     }
+    if not e_full:
+        raise ValueError(
+            f"every one of the {len(pairs)} pairs was dropped for prompt-length "
+            "mismatch; the standalone-hint length filter is not sufficient for "
+            "this tokenizer and pairs.build_pair_table needs a prompt-level check"
+        )
     report = pilot_report(results)
     report.to_csv(os.path.join(base_dir, f"{prefix}_causal_pilot_{mode}.csv"), index=False)
     return report, results

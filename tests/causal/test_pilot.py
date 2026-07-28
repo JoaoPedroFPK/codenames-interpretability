@@ -170,3 +170,23 @@ def test_pilot_runs_on_whatever_device_the_model_is_on(tiny, tmp_path):
         hidden_dim=model.config.hidden_size, seed=2026,
     )
     assert results["P2"] == pytest.approx(1.0, abs=0.02)
+
+
+def test_pilot_drops_misaligned_pairs_and_reports_the_yield(tiny, tmp_path):
+    """Regression: a 124-vs-123 token prompt pair crashed the real run.
+
+    Equal standalone hint lengths do not imply equal prompt lengths. The pilot
+    must drop those pairs and report the yield, never patch across them.
+    """
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, gen = _pilot_fixtures(tmp_path)
+    _, results = run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=gen,
+        base_dir=str(tmp_path), prefix="tiny", mode="no_social",
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, seed=2026,
+    )
+    assert "n_misaligned_dropped" in results
+    assert "alignment_yield" in results
+    assert results["n_measured"] + results["n_misaligned_dropped"] == results["n_pairs"]

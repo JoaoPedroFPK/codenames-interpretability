@@ -51,6 +51,16 @@ def attribution_scan(
     n_layers = len(clean_cache)
     n_positions = int(inputs["input_ids"].shape[1])
 
+    # Fail with a diagnosis rather than a broadcast error deep in the loop.
+    cached_positions = int(clean_cache[0].shape[1])
+    if cached_positions != n_positions:
+        raise ValueError(
+            f"clean cache has {cached_positions} positions but the corrupted "
+            f"prompt has {n_positions}; patching (layer, position) across "
+            "different-length sequences is undefined. Drop the pair upstream "
+            "(see causal_spec.md §5A alignment rule)."
+        )
+
     captured: Dict[int, torch.Tensor] = {}
     handles = []
 

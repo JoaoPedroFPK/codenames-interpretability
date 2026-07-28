@@ -74,3 +74,15 @@ def test_top_sites_returns_the_largest_by_absolute_score():
 def test_top_sites_is_bounded_by_grid_size():
     grid = np.zeros((2, 2))
     assert len(top_sites(grid, k=99)) == 4
+
+
+def test_mismatched_cache_length_gives_a_diagnosis_not_a_broadcast_error(setup):
+    """Regression: a 124-vs-123 pair produced an opaque tensor-size error."""
+    model, tok, cache, table = setup
+    truncated = [h[:, :-1, :] for h in cache]      # simulate a shorter clean run
+    with pytest.raises(ValueError, match="positions"):
+        attribution_scan(
+            model=model, tokenizer=tok, clean_cache=truncated,
+            corrupt_prompt=CORRUPT_PROMPT, readout_table=table,
+            clean_target="sea", donor_target="ship", p_star=-1, device="cpu",
+        )
