@@ -107,6 +107,16 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P8", "what": "throughput and storage",
          "observed": results.get("P8_fwd_per_s"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P4_sign", "what": "LD_corrupt < 0 (donor beats clean target)",
+         "observed": results.get("P4_sign"), "threshold": f">= {t['P4_sign']}",
+         "passed": float(results.get("P4_sign", 0.0)) >= t["P4_sign"],
+         "blocking": False},
+        {"check": "alignment", "what": "pairs surviving prompt-length alignment",
+         "observed": results.get("alignment_yield"), "threshold": "recorded",
+         "passed": True, "blocking": False},
+        {"check": "n_measured", "what": "pairs actually measured",
+         "observed": results.get("n_measured"), "threshold": "recorded",
+         "passed": True, "blocking": False},
     ]
     return pd.DataFrame(rows)
 
@@ -208,14 +218,24 @@ def run_pilot(
             text, word = row.get("generated_text"), row.get("generated_word")
             if isinstance(text, str) and isinstance(word, str):
                 position = answer_position(tokenizer, clean_prompt, text, word)
-                if position is not None:
+                if position is not None and position > 0:
+                    # Teacher-force the recorded generation and ask whether the
+                    # model's greedy prediction AT p*-1 reproduces the token
+                    # actually sitting at p*. Because the generation was greedy,
+                    # this must hold; a miss means p* is mis-indexed or the
+                    # teacher-forcing is wrong.
+                    #
+                    # Do NOT re-encode a prefix separately to derive the
+                    # expected token: BPE prompt tokenisation is not a prefix
+                    # of the joint tokenisation, so the ids would not line up
+                    # (see tests/causal/test_positions.py).
                     joint = tokenizer(clean_prompt + text, return_tensors="pt").to(device)
                     ids = joint["input_ids"][0]
-                    expected = tokenizer.encode(
-                        text[: text.lower().find(word.lower())] + word,
-                        add_special_tokens=False,
-                    )
-                    p1_hits.append(bool(expected) and int(ids[position]) == expected[-1])
+                    with torch.no_grad():
+                        joint_logits = model(**joint).logits[0]
+                    predicted = int(joint_logits[position - 1].argmax())
+                    p1_hits.append(predicted == int(ids[position]))
+                    forwards += 1
 
         clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
         with torch.no_grad():

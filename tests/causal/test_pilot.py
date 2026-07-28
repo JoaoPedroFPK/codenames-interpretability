@@ -126,7 +126,7 @@ def test_run_pilot_produces_the_full_report(tiny, tmp_path):
         chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
         hidden_dim=model.config.hidden_size, device="cpu", seed=2026,
     )
-    assert set(report["check"]) == {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"}
+    assert {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"} <= set(report["check"])
     assert "P8_fwd_per_s" in results and results["P8_fwd_per_s"] > 0
 
 
@@ -190,3 +190,29 @@ def test_pilot_drops_misaligned_pairs_and_reports_the_yield(tiny, tmp_path):
     assert "n_misaligned_dropped" in results
     assert "alignment_yield" in results
     assert results["n_measured"] + results["n_misaligned_dropped"] == results["n_pairs"]
+
+
+def test_p1_uses_teacher_forced_argmax_not_a_reencoded_prefix(tiny, tmp_path):
+    """Regression: P1 read 0.0 because it re-encoded a prefix separately.
+
+    BPE prompt tokenisation is not a prefix of the joint tokenisation, and the
+    old check also compared a LAST subword against the FIRST token at p*.
+    """
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert "argmax" in src
+    assert "text[: text.lower().find(word.lower())]" not in src
+
+
+def test_report_surfaces_alignment_and_sign_diagnostics(tiny, tmp_path):
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, gen = _pilot_fixtures(tmp_path)
+    report, _ = run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=gen,
+        base_dir=str(tmp_path), prefix="tiny", mode="no_social",
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, seed=2026,
+    )
+    assert {"P4_sign", "alignment", "n_measured"} <= set(report["check"])
