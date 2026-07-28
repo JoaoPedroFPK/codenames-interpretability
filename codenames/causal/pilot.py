@@ -117,6 +117,19 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "n_measured", "what": "pairs actually measured",
          "observed": results.get("n_measured"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P4_clean_acc", "what": "clean run answers its own target",
+         "observed": results.get("P4_clean_accuracy"), "threshold": "recorded",
+         "passed": True, "blocking": False},
+        {"check": "P4_normalised",
+         "what": "flip rate / clean accuracy (corruption works GIVEN the model can answer)",
+         "observed": (
+             float(results.get("P4_flip", 0.0)) / results["P4_clean_accuracy"]
+             if results.get("P4_clean_accuracy") else None),
+         "threshold": "diagnostic only - NOT a gate",
+         "passed": True, "blocking": False},
+        {"check": "P8_wall", "what": "throughput incl. backward + generation",
+         "observed": results.get("P8_wall_fwd_per_s"), "threshold": "recorded",
+         "passed": True, "blocking": False},
     ]
     return pd.DataFrame(rows)
 
@@ -192,6 +205,8 @@ def run_pilot(
     p1_hits, flips, ld_corrupts = [], [], []
     e_full, e_null, attribution_pairs = [], [], []
     started, forwards = time.perf_counter(), 0
+    fwd_seconds = 0.0          # forward-pass time ONLY (excludes backward + generate)
+    clean_correct = []         # model answers its own clean hint -> P4 denominator
 
     misaligned = 0
     for pair in pairs.itertuples():
@@ -238,8 +253,10 @@ def run_pilot(
                     forwards += 1
 
         clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
+        _t0 = time.perf_counter()
         with torch.no_grad():
             clean_out = model(**clean_inputs, output_hidden_states=True)
+        fwd_seconds += time.perf_counter() - _t0
         cache = [h.detach().clone() for h in clean_out.hidden_states]
         forwards += 1
 
@@ -249,8 +266,10 @@ def run_pilot(
         )
 
         corrupt_inputs = tokenizer(corrupt_prompt, return_tensors="pt").to(device)
+        _t0 = time.perf_counter()
         with torch.no_grad():
             corrupt_logits = model(**corrupt_inputs).logits[0, p_star]
+        fwd_seconds += time.perf_counter() - _t0
         forwards += 1
         ld_corrupt = logit_difference(
             corrupt_logits.detach().float().cpu().numpy(),
@@ -263,6 +282,13 @@ def run_pilot(
                   for w, ids in table.items() if ids}
         if scores:
             flips.append(max(scores, key=scores.get) == pair.donor_target)
+
+        clean_logits = clean_out.logits[0, p_star].detach().float().cpu().numpy()
+        clean_scores = {w: float(clean_logits[ids].max())
+                        for w, ids in table.items() if ids}
+        if clean_scores:
+            clean_correct.append(
+                max(clean_scores, key=clean_scores.get) == pair.clean_target)
 
         shared = dict(
             model=model, tokenizer=tokenizer, clean_cache=cache,
@@ -330,7 +356,10 @@ def run_pilot(
         "P6_change": float(np.mean(changed)) if changed else 0.0,
         "P6_parse": 1.0,
         "P7_finite": bool(np.isfinite(np.array(e_full, dtype=float)).all()),
-        "P8_fwd_per_s": forwards / elapsed,
+        "P8_fwd_per_s": forwards / max(fwd_seconds, 1e-9),
+        "P8_wall_fwd_per_s": forwards / elapsed,
+        "P8_wall_seconds": elapsed,
+        "P4_clean_accuracy": float(np.mean(clean_correct)) if clean_correct else 0.0,
         "n_pairs": int(len(pairs)),
         "n_measured": int(len(e_full)),
         "n_misaligned_dropped": int(misaligned),

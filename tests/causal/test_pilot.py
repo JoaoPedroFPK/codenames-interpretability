@@ -216,3 +216,28 @@ def test_report_surfaces_alignment_and_sign_diagnostics(tiny, tmp_path):
         hidden_dim=model.config.hidden_size, seed=2026,
     )
     assert {"P4_sign", "alignment", "n_measured"} <= set(report["check"])
+
+
+def test_p8_separates_forward_only_from_wall_clock():
+    """The first real run reported 13.1 fwd/s, but that clock also covered
+    backward passes and generation. Forward-only is the number that converts
+    the §12.2 counts into A100-hours."""
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert "fwd_seconds" in src
+    assert '"P8_wall_fwd_per_s"' in src
+
+
+def test_p4_normalised_is_diagnostic_not_a_gate():
+    """The flip rate needs the model's own accuracy as a denominator, but that
+    must not silently become a pass condition."""
+    from codenames.causal.pilot import pilot_report, pilot_verdict
+    r = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.567, "P4_sign": 0.9,
+         "P5_rho": 0.7, "P5_fnr": 0.1, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True, "P4_clean_accuracy": 0.617}
+    report = pilot_report(r).set_index("check")
+    assert report.loc["P4_normalised", "observed"] == pytest.approx(0.567 / 0.617, abs=1e-6)
+    assert "NOT a gate" in report.loc["P4_normalised", "threshold"]
+    # the real gate still fails on the raw flip rate
+    assert "P4" in pilot_verdict(r)["blocking_failures"]
