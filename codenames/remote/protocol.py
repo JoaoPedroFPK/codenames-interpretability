@@ -26,6 +26,15 @@ ALLOWED_SUBCOMMANDS: FrozenSet[str] = frozenset(
         "preflight",
         "validate",
         "compare",
+        # Causal tier (docs/specs/causal_spec.md §12). GPU stages only:
+        # causal-analyze is deliberately absent because it needs no GPU and
+        # runs locally, and every entry here widens the execution surface of a
+        # personal Drive folder.
+        "causal-extract",
+        "causal-scan",
+        "causal-patch",
+        "causal-steer",
+        "causal-pilot",
     }
 )
 

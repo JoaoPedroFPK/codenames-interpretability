@@ -84,6 +84,23 @@ def test_whitelist_covers_the_gpu_stages_and_nothing_destructive():
     assert "visualize" not in ALLOWED_SUBCOMMANDS
 
 
+def test_whitelist_covers_the_causal_gpu_stages():
+    """The causal tier's GPU stages are dispatchable (causal_spec.md §12)."""
+    assert {
+        "causal-extract", "causal-scan", "causal-patch",
+        "causal-steer", "causal-pilot",
+    } <= ALLOWED_SUBCOMMANDS
+
+
+def test_offline_causal_stage_is_not_dispatchable():
+    """causal-analyze needs no GPU; it runs locally and stays off the queue.
+
+    The whitelist is a security boundary on a personal Drive folder, so it
+    admits only what genuinely needs the GPU session.
+    """
+    assert "causal-analyze" not in ALLOWED_SUBCOMMANDS
+
+
 @pytest.mark.parametrize(
     "src,dst",
     [
