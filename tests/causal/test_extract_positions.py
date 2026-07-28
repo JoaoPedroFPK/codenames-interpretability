@@ -120,3 +120,17 @@ def test_p_star_is_not_derived_from_prompt_token_count(tiny, tmp_path):
     # Word-first turn: p* must land before the prompt's own token count, because
     # the prompt's trailing whitespace merges with the first generated token.
     assert index.loc[0, "p_star"] < lens_index.loc[0, "prompt_token_count"]
+
+
+def test_candidate_span_request_raises_rather_than_silently_ignoring(tiny, tmp_path):
+    """A deferred feature must fail loudly, not accept-and-ignore."""
+    model, tok = tiny
+    contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
+    with pytest.raises(NotImplementedError, match="candidate-span"):
+        run_lens_extraction(
+            model=model, tokenizer=tok, df=_frame(), base_dir=str(tmp_path),
+            prefix="tiny", contract=contract, chat_template_strategy="raw",
+            num_layers=model.config.num_hidden_layers,
+            hidden_dim=model.config.hidden_size, conditions=("no_social",),
+            device="cpu", candidate_span_row_ids={0, 1},
+        )

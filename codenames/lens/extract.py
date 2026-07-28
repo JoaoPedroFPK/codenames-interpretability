@@ -108,9 +108,23 @@ def run_lens_extraction(
     generation_csv: Optional[str] = None,
     candidate_span_row_ids: Optional[Set[int]] = None,
 ) -> Dict[str, Dict[str, str]]:
+    """Extract per-layer states at the generating position, optionally at p*.
+
+    ``candidate_span_row_ids`` restricts the candidate-span dump to the causal
+    subsample. It is NOT yet implemented: passing a non-None value raises,
+    rather than silently ignoring the request. At full corpus these states are
+    ~169 GB across both decoders (causal_spec.md §12.4), and they serve an
+    explicitly secondary readout that neither the pilot gate nor any primary
+    claim depends on, so the dump is deferred to a wave-2 task.
+    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if candidate_span_row_ids is not None:
+        raise NotImplementedError(
+            "candidate-span dumping is deferred (lens_spec.md §5 secondary "
+            "readout); see causal_spec.md §12.4 for the storage rationale"
+        )
     if dump_answer_position and generation_csv is None:
         raise ValueError("dump_answer_position=True requires generation_csv")
     generations = None
