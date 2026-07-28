@@ -128,10 +128,51 @@ def cmd_steer(args) -> int:
 
 
 def cmd_pilot(args) -> int:
-    raise NotImplementedError(
-        "causal-pilot orchestration is not built yet; the gate logic is "
-        "available and tested at codenames.causal.pilot.pilot_verdict"
+    """Run the §12.5 gate and print the P1-P8 table plus the launch verdict."""
+    from .pilot import pilot_verdict, run_pilot
+
+    paths = _paths(args)
+    os.makedirs(paths["base"], exist_ok=True)
+    model, tokenizer, meta = _load_model(args.model)
+    df = _sample(args.dataset, args.sample_size, args.seed)
+
+    generation_csv = getattr(args, "generation_csv", None)
+    if generation_csv is None:
+        generation_csv = os.path.join(
+            paths["base"], f"{paths['prefix']}_generation_{args.condition}.csv")
+    if not os.path.exists(generation_csv):
+        raise FileNotFoundError(
+            f"pilot check P1 needs the recorded generations at {generation_csv}; "
+            "pass --generation-csv to point at them"
+        )
+
+    report, results = run_pilot(
+        model=model, tokenizer=tokenizer, df_sample=df,
+        generation_csv=generation_csv, base_dir=paths["base"],
+        prefix=paths["prefix"], mode=args.condition,
+        chat_template_strategy=meta["chat_template_strategy"],
+        num_layers=meta["num_layers"], hidden_dim=meta["hidden_dim"],
+        seed=args.seed,
     )
+
+    print("\n" + report.to_string(index=False))
+    verdict = pilot_verdict(results)
+    print(f"\n  pairs measured: {results.get('n_pairs')}")
+    print(f"  throughput:     {results.get('P8_fwd_per_s', 0):.1f} forwards/s")
+    if verdict["launch_full_run"]:
+        print("\n  GATE PASSED - the confirmatory run may be launched.")
+    else:
+        print(f"\n  GATE FAILED on {', '.join(verdict['blocking_failures'])} "
+              "- fix the pipeline; do NOT run the confirmatory stages.")
+    if verdict["attribution_shortcut_lost"]:
+        print("  NOTE: attribution screen unreliable - re-cost before proceeding (§3.3.4).")
+    if verdict["rq2_bounded_negative"]:
+        print("  NOTE: steering inert - RQ2 becomes a bounded negative (§2.1 row 4).")
+
+    report_path = getattr(args, "report_path", None) or paths["pilot"]
+    report.to_csv(report_path, index=False)
+    print(f"\n  report -> {report_path}")
+    return 0 if verdict["launch_full_run"] else 1
 
 
 def cmd_analyze(args) -> int:

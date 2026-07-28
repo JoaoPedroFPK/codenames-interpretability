@@ -1635,10 +1635,13 @@ def _make_causal_pilot_parser(sp) -> argparse.ArgumentParser:
         ),
     )
     _add_causal_common(p)
-    p.add_argument("--dataset", help="Path to clue_generation.csv.")
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
     p.add_argument("--sample-size", type=int, default=_PILOT_N)
     p.add_argument("--condition", default="with_social",
                    choices=["no_social", "with_social"])
+    p.add_argument("--generation-csv", default=None,
+                   help="Recorded generations, needed by check P1. Defaults to "
+                        "{output-dir}/{prefix}_generation_{condition}.csv.")
     p.add_argument("--report-path", default=None,
                    help="Where to write the P1-P8 table (default: output dir).")
     return p

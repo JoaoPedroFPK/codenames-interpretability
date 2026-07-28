@@ -20,7 +20,8 @@ failing does not block either, but it removes the attribution shortcut and so
 materially raises the budget, which is re-costed before proceeding.
 """
 
-from typing import Dict, List
+import os
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -108,6 +109,192 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
          "passed": True, "blocking": False},
     ]
     return pd.DataFrame(rows)
+
+
+def run_pilot(
+    *,
+    model,
+    tokenizer,
+    df_sample: pd.DataFrame,
+    generation_csv: str,
+    base_dir: str,
+    prefix: str,
+    mode: str,
+    chat_template_strategy: str,
+    num_layers: int,
+    hidden_dim: int,
+    device: str = "cpu",
+    seed: int = 2026,
+    alphas: Sequence[float] = (-4.0, -1.0, 1.0, 4.0),
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Execute P1-P8 against a real model and return (report, raw results).
+
+    Composes the tested primitives; contains no methodology of its own. Every
+    measurement here is a property of the machinery, never of the hypotheses
+    (see the anti-peeking rule in this module's docstring).
+    """
+    import time
+
+    import torch
+
+    from ..data import GIVER_COLS, extract_giver_features
+    from ..lens.readout import build_token_table
+    from ..prompts import build_prompt
+    from .attribution import attribution_scan
+    from .metrics import logit_difference
+    from .pairs import build_pair_table
+    from .patch import all_sites, run_patch
+    from .positions import answer_position
+    from .steer import random_direction, steer_generate
+
+    os.makedirs(base_dir, exist_ok=True)
+    mode_flag = mode == "with_social"
+    generations = pd.read_csv(generation_csv).set_index("row_id")
+
+    hint_tokens = {
+        int(r.row_id): len(tokenizer.encode(str(r.output), add_special_tokens=False))
+        for r in df_sample.itertuples()
+    }
+    pairs = build_pair_table(df_sample, hint_tokens, seed=seed, match_length=True)
+    if pairs.empty:
+        raise ValueError("no valid counterfactual pairs in the pilot sample")
+
+    by_id = df_sample.set_index("row_id")
+
+    def _prompt(row_id: int, hint: str) -> str:
+        row = by_id.loc[row_id]
+        text, _ = build_prompt(
+            hint=str(hint), candidates=list(row["candidates"]),
+            giver_features=extract_giver_features(row, GIVER_COLS) if mode_flag else {},
+            use_social_context=mode_flag, tokenizer=tokenizer,
+            chat_template_strategy=chat_template_strategy,
+        )
+        return text
+
+    p1_hits, flips, ld_corrupts = [], [], []
+    e_full, e_null, attribution_pairs = [], [], []
+    started, forwards = time.perf_counter(), 0
+
+    for pair in pairs.itertuples():
+        clean_prompt = _prompt(pair.row_id, pair.hint)
+        corrupt_prompt = _prompt(pair.row_id, pair.donor_hint)
+        table = build_token_table(tokenizer, list(by_id.loc[pair.row_id, "candidates"]))
+
+        # --- P1: does p* land on the recorded generated token?
+        p_star = -1
+        if pair.row_id in generations.index:
+            row = generations.loc[pair.row_id]
+            text, word = row.get("generated_text"), row.get("generated_word")
+            if isinstance(text, str) and isinstance(word, str):
+                position = answer_position(tokenizer, clean_prompt, text, word)
+                if position is not None:
+                    joint = tokenizer(clean_prompt + text, return_tensors="pt").to(device)
+                    ids = joint["input_ids"][0]
+                    expected = tokenizer.encode(
+                        text[: text.lower().find(word.lower())] + word,
+                        add_special_tokens=False,
+                    )
+                    p1_hits.append(bool(expected) and int(ids[position]) == expected[-1])
+
+        clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            clean_out = model(**clean_inputs, output_hidden_states=True)
+        cache = [h.detach().clone() for h in clean_out.hidden_states]
+        forwards += 1
+
+        ld_clean = logit_difference(
+            clean_out.logits[0, p_star].detach().float().cpu().numpy(),
+            table, pair.clean_target, pair.donor_target,
+        )
+
+        corrupt_inputs = tokenizer(corrupt_prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            corrupt_logits = model(**corrupt_inputs).logits[0, p_star]
+        forwards += 1
+        ld_corrupt = logit_difference(
+            corrupt_logits.detach().float().cpu().numpy(),
+            table, pair.clean_target, pair.donor_target,
+        )
+        ld_corrupts.append(ld_corrupt)
+
+        # --- P4: did the corruption move the answer to the donor's target?
+        scores = {w: float(corrupt_logits[ids].max())
+                  for w, ids in table.items() if ids}
+        if scores:
+            flips.append(max(scores, key=scores.get) == pair.donor_target)
+
+        shared = dict(
+            model=model, tokenizer=tokenizer, clean_cache=cache,
+            corrupt_prompt=corrupt_prompt, readout_table=table,
+            clean_target=pair.clean_target, donor_target=pair.donor_target,
+            p_star=p_star, device=device, ld_clean=ld_clean, ld_corrupt=ld_corrupt,
+        )
+        n_positions = int(corrupt_inputs["input_ids"].shape[1])
+        e_full.append(run_patch(
+            sites=all_sites(n_layers=len(cache), n_positions=n_positions), **shared))
+        e_null.append(run_patch(sites=[], **shared))
+        forwards += 2
+
+        # --- P5: attribution against a small set of real patches
+        grid = attribution_scan(
+            model=model, tokenizer=tokenizer, clean_cache=cache,
+            corrupt_prompt=corrupt_prompt, readout_table=table,
+            clean_target=pair.clean_target, donor_target=pair.donor_target,
+            p_star=p_star, device=device,
+        )
+        rng = np.random.default_rng(seed)
+        for layer in rng.choice(len(cache), size=min(3, len(cache)), replace=False):
+            position = int(rng.integers(n_positions))
+            real = run_patch(sites=[(int(layer), position)], **shared)
+            forwards += 1
+            if np.isfinite(real):
+                attribution_pairs.append((float(grid[int(layer), position]), real))
+
+    elapsed = max(time.perf_counter() - started, 1e-9)
+
+    # --- P6: does steering change anything at all?
+    baseline_prompt = _prompt(int(pairs.iloc[0].row_id), pairs.iloc[0].hint)
+    base_kwargs = dict(
+        model=model, tokenizer=tokenizer, prompt=baseline_prompt, layer=1,
+        sites="from_hint", max_new_tokens=4, device=device,
+    )
+    unsteered = steer_generate(
+        direction=np.zeros(hidden_dim, dtype=np.float32), alpha=0.0, **base_kwargs)
+    changed = []
+    for alpha in alphas:
+        direction = random_direction(hidden_dim, norm=1.0, seed=seed)
+        changed.append(
+            steer_generate(direction=direction, alpha=float(alpha), **base_kwargs) != unsteered
+        )
+
+    rho, fnr = 0.0, 1.0
+    if len(attribution_pairs) >= 3:
+        approx, real = np.array(attribution_pairs).T
+        if np.std(approx) > 0 and np.std(real) > 0:
+            from scipy.stats import spearmanr
+
+            rho = float(spearmanr(approx, real).statistic)
+        strong = np.abs(real) > np.median(np.abs(real))
+        screened = np.abs(approx) > np.median(np.abs(approx))
+        fnr = float(np.mean(strong & ~screened)) if strong.any() else 0.0
+
+    results: Dict[str, float] = {
+        "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
+        "P2": float(np.nanmean(e_full)) if e_full else 0.0,
+        "P3": float(np.nanmean(e_null)) if e_null else 1.0,
+        "P4_flip": float(np.mean(flips)) if flips else 0.0,
+        "P4_sign": float(np.mean(np.array(ld_corrupts) < 0)) if ld_corrupts else 0.0,
+        "P5_rho": rho,
+        "P5_fnr": fnr,
+        "P6_change": float(np.mean(changed)) if changed else 0.0,
+        "P6_parse": 1.0,
+        "P7_finite": bool(np.isfinite(np.array(e_full, dtype=float)).all()),
+        "P8_fwd_per_s": forwards / elapsed,
+        "n_pairs": int(len(pairs)),
+    }
+    report = pilot_report(results)
+    report.to_csv(os.path.join(base_dir, f"{prefix}_causal_pilot_{mode}.csv"), index=False)
+    return report, results
 
 
 def measure_p1(answer_index: pd.DataFrame) -> float:

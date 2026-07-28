@@ -70,3 +70,18 @@ def test_turns_without_a_donor_are_dropped_not_silently_mispaired():
     ])
     out = build_pair_table(df, {9: 1}, seed=2026, match_length=False)
     assert len(out) == 0
+
+
+def test_pair_table_accepts_the_real_dataset_hint_column():
+    """CULTURAL CODES stores the clue in `output`, not `hint`."""
+    df = _frame().rename(columns={"hint": "output"})
+    out = build_pair_table(df, HINT_TOKENS, seed=2026, match_length=False)
+    assert len(out) > 0
+    assert set(out["hint"]) <= {"ocean", "rocket", "a b c"}
+
+
+def test_missing_hint_column_is_a_clear_error():
+    from codenames.causal.pairs import hint_column
+    import pytest
+    with pytest.raises(KeyError, match="hint.*output"):
+        hint_column(_frame().drop(columns=["hint"]))

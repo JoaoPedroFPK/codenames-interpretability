@@ -29,7 +29,8 @@ def test_existing_commands_still_registered():
 
 def test_pilot_defaults_match_the_spec():
     args = build_parser().parse_args(["causal-pilot", "--model", "mistral",
-                                      "--output-dir", "/tmp/x"])
+                                      "--output-dir", "/tmp/x",
+                                      "--dataset", "/tmp/d.csv"])
     assert args.sample_size == 150
     assert args.condition == "with_social"
     assert args.seed == 2026
@@ -59,11 +60,12 @@ def test_causal_models_are_the_three_decoders():
     parser = build_parser()
     for model in ("mistral", "qwen", "qwen_random"):
         args = parser.parse_args(["causal-pilot", "--model", model,
-                                  "--output-dir", "/tmp/x"])
+                                  "--output-dir", "/tmp/x",
+                                  "--dataset", "/tmp/d.csv"])
         assert args.model == model
     with pytest.raises(SystemExit):
         parser.parse_args(["causal-pilot", "--model", "bert",
-                           "--output-dir", "/tmp/x"])
+                           "--output-dir", "/tmp/x", "--dataset", "/tmp/d.csv"])
 
 
 def test_dispatch_routes_every_causal_command():
@@ -76,7 +78,7 @@ def test_unbuilt_stages_raise_not_implemented_rather_than_failing_oddly():
     """Stages whose orchestration is not built must say so explicitly."""
     from codenames.causal import runner
     import argparse
-    for name in ("causal-scan", "causal-patch", "causal-steer", "causal-pilot"):
+    for name in ("causal-scan", "causal-patch", "causal-steer"):
         args = argparse.Namespace(command=name, model="mistral",
                                   output_dir="/tmp/x", seed=2026)
         with pytest.raises(NotImplementedError, match="not built yet"):

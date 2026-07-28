@@ -19,6 +19,19 @@ import numpy as np
 import pandas as pd
 
 
+def hint_column(df: pd.DataFrame) -> str:
+    """Name of the column holding the clue word.
+
+    CULTURAL CODES stores it as ``output``; test fixtures and intermediate
+    tables often call it ``hint``. Accepting both keeps callers from having to
+    rename a column just to cross this boundary.
+    """
+    for name in ("hint", "output"):
+        if name in df.columns:
+            return name
+    raise KeyError("expected a 'hint' or 'output' column holding the clue word")
+
+
 def build_donor_index(targets: Dict[int, Sequence[str]]) -> Dict[str, List[int]]:
     """Map each target word to the turns whose true target set contains it."""
     index: Dict[str, List[int]] = defaultdict(list)
@@ -69,9 +82,10 @@ def build_pair_table(
     caller, since it depends on the model's tokenizer and is not a dataset
     column.
     """
+    hint_col = hint_column(df_sample)
     targets = {int(r.row_id): list(r.targets) for r in df_sample.itertuples()}
     boards = {int(r.row_id): list(r.candidates) for r in df_sample.itertuples()}
-    hints = {int(r.row_id): r.hint for r in df_sample.itertuples()}
+    hints = dict(zip(df_sample["row_id"].astype(int), df_sample[hint_col]))
     index = build_donor_index(targets)
 
     rng = np.random.default_rng(seed)

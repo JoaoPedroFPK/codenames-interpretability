@@ -80,3 +80,66 @@ def test_report_marks_p8_as_recorded_not_thresholded():
     frame = pilot_report(_results()).set_index("check")
     assert frame.loc["P8", "threshold"] == "recorded"
     assert bool(frame.loc["P8", "passed"]) is True  # pandas stores np.bool_
+
+
+# --- end-to-end pilot on the tiny model -----------------------------------
+
+import numpy as np
+import pytest
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+TINY = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
+
+
+@pytest.fixture(scope="module")
+def tiny():
+    model = AutoModelForCausalLM.from_pretrained(TINY)
+    model.eval()
+    tok = AutoTokenizer.from_pretrained(TINY)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    return model, tok
+
+
+def _pilot_fixtures(tmp_path):
+    df = pd.DataFrame([
+        {"row_id": 1, "output": "water", "targets": ["sea"], "black": ["moon"],
+         "tan": ["ship"], "candidates": ["moon", "sea", "ship"]},
+        {"row_id": 2, "output": "rocket", "targets": ["moon"], "black": ["sea"],
+         "tan": ["ship"], "candidates": ["moon", "sea", "ship"]},
+    ])
+    gen = tmp_path / "gen.csv"
+    pd.DataFrame([
+        {"row_id": 1, "generated_text": "sea", "generated_word": "sea"},
+        {"row_id": 2, "generated_text": "moon", "generated_word": "moon"},
+    ]).to_csv(gen, index=False)
+    return df, str(gen)
+
+
+def test_run_pilot_produces_the_full_report(tiny, tmp_path):
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, gen = _pilot_fixtures(tmp_path)
+    report, results = run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=gen,
+        base_dir=str(tmp_path), prefix="tiny", mode="no_social",
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, device="cpu", seed=2026,
+    )
+    assert set(report["check"]) == {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"}
+    assert "P8_fwd_per_s" in results and results["P8_fwd_per_s"] > 0
+
+
+def test_pilot_identities_hold_on_a_real_model(tiny, tmp_path):
+    """P2 and P3 are exact identities, not tolerances - they must hold here."""
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, gen = _pilot_fixtures(tmp_path)
+    _, results = run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=gen,
+        base_dir=str(tmp_path), prefix="tiny", mode="no_social",
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, device="cpu", seed=2026,
+    )
+    assert results["P2"] == pytest.approx(1.0, abs=0.02), "full-stack patch identity"
+    assert abs(results["P3"]) <= 0.02, "null patch identity"
