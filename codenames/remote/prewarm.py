@@ -32,6 +32,41 @@ def repo_for(model_key: str) -> str:
         ) from None
 
 
+# Weight formats ``from_pretrained`` will not load when safetensors are
+# present. Mistral-7B-Instruct-v0.2 ships a full ``.bin`` copy alongside its
+# safetensors, so a bare snapshot of that repo transfers 29.5 GB to obtain the
+# 14.5 GB the loader actually reads.
+_REDUNDANT_WEIGHTS = ("*.bin", "*.pth", "*.h5", "*.msgpack", "consolidated*")
+
+
+def _repo_files(repo_id: str) -> List[str]:
+    """Filenames in the repo; empty when the listing cannot be fetched."""
+    from huggingface_hub import HfApi
+
+    return [s.rfilename for s in HfApi().model_info(repo_id).siblings]
+
+
+def ignore_patterns_for(repo_id: str) -> List[str]:
+    """Glob patterns to skip, or ``[]`` when everything is needed.
+
+    Duplicate weight formats are skipped only after confirming the repo really
+    does publish sharded safetensors. A repo that ships ``.bin`` alone would
+    otherwise be warmed into a cache with no weights in it, and the job would
+    then download them itself -- the exact failure this module exists to
+    prevent. When the listing cannot be fetched, nothing is skipped: a slower
+    warm is a far cheaper mistake than an incomplete one.
+    """
+    try:
+        files = _repo_files(repo_id)
+    except Exception:  # noqa: BLE001 - offline/rate-limited; fetch everything
+        return []
+    has_sharded_safetensors = any(
+        f.endswith(".safetensors") and not f.startswith("consolidated")
+        for f in files
+    )
+    return list(_REDUNDANT_WEIGHTS) if has_sharded_safetensors else []
+
+
 def _snapshot_download(repo_id: str, **kwargs):
     """Indirection so tests can substitute the network call."""
     from huggingface_hub import snapshot_download
@@ -58,9 +93,13 @@ def prewarm_models(model_keys: Iterable[str], *, quiet: bool = False) -> Dict[st
                 print(f"  {key}: already warmed via {repo}")
             continue
         try:
+            skip = ignore_patterns_for(repo)
             if not quiet:
-                print(f"  {key}: fetching {repo} ...")
-            path = _snapshot_download(repo)
+                note = " (skipping duplicate weight formats)" if skip else ""
+                print(f"  {key}: fetching {repo}{note} ...")
+            # max_workers raises shard throughput on Colab, where the bottleneck
+            # is per-connection rather than total bandwidth.
+            path = _snapshot_download(repo, ignore_patterns=skip, max_workers=8)
             seen[repo] = str(path)
             results[key] = str(path)
             if not quiet:

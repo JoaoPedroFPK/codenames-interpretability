@@ -48,3 +48,52 @@ def test_prewarm_accepts_an_empty_selection(monkeypatch):
     monkeypatch.setattr("codenames.remote.prewarm._snapshot_download",
                         lambda repo_id, **kw: "/cache")
     assert prewarm_models([]) == {}
+
+
+# --- do not transfer weight formats the loader will never read -------------
+#
+# Mistral-7B-Instruct-v0.2 publishes a full .bin copy beside its safetensors:
+# 29.5 GB in the repo for the 14.5 GB from_pretrained actually loads. Warming
+# both decoders moved 44.7 GB instead of 29.7 GB, which is why the pre-warm
+# cell ran long enough to look hung.
+
+def test_duplicate_weight_formats_are_skipped(monkeypatch):
+    monkeypatch.setattr("codenames.remote.prewarm._repo_files",
+                        lambda repo: ["config.json",
+                                      "model-00001-of-00003.safetensors",
+                                      "pytorch_model-00001-of-00003.bin"])
+    from codenames.remote.prewarm import ignore_patterns_for
+    assert "*.bin" in ignore_patterns_for("any/repo")
+
+
+def test_a_repo_with_only_bin_weights_is_fetched_whole(monkeypatch):
+    """Skipping .bin there would warm a cache containing no weights at all,
+    and the job would then race the download this module exists to avoid."""
+    monkeypatch.setattr("codenames.remote.prewarm._repo_files",
+                        lambda repo: ["config.json", "pytorch_model.bin"])
+    from codenames.remote.prewarm import ignore_patterns_for
+    assert ignore_patterns_for("any/repo") == []
+
+
+def test_an_unreachable_listing_fetches_everything(monkeypatch):
+    """A slow warm is a cheaper mistake than an incomplete one."""
+    def boom(repo):
+        raise OSError("rate limited")
+    monkeypatch.setattr("codenames.remote.prewarm._repo_files", boom)
+    from codenames.remote.prewarm import ignore_patterns_for
+    assert ignore_patterns_for("any/repo") == []
+
+
+def test_prewarm_passes_the_skip_list_to_the_download(monkeypatch):
+    seen = {}
+
+    def fake(repo_id, **kwargs):
+        seen.update(kwargs)
+        return "/cache"
+
+    monkeypatch.setattr("codenames.remote.prewarm._repo_files",
+                        lambda repo: ["model-00001-of-00002.safetensors",
+                                      "pytorch_model.bin"])
+    monkeypatch.setattr("codenames.remote.prewarm._snapshot_download", fake)
+    prewarm_models(["mistral"])
+    assert "*.bin" in seen["ignore_patterns"]
