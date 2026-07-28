@@ -47,6 +47,13 @@ viz = [
 lens = [
     "datasets==3.2.0",
 ]
+# Local client for the Colab job queue (Drive API). Client side only — the
+# Colab runner reaches the same job tree through its FUSE mount and needs none
+# of this, so these stay out of the Colab-tuned core pin set.
+remote = [
+    "google-api-python-client==2.149.0",
+    "google-auth-oauthlib==1.2.1",
+]
 
 [project.scripts]
 codenames-experiment = "codenames.cli:main"
