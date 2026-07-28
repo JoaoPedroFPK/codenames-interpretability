@@ -69,9 +69,10 @@ codenames-interpretability/
 │   ├── persistence.py              # File I/O for CSV / parquet / NPZ
 │   ├── models/                     # One file per model: load_<name>()
 │   ├── lens/                       # Vocabulary-space lens pipeline (raw + tuned)
+│   ├── remote/                     # Drive-mediated job queue for Colab runs
 │   ├── analysis/                   # Cross-model tables and the figure set
 │   └── viz/                        # Per-board heatmaps and 2D projections
-├── notebooks/                      # Thin orchestration shells (01–07 per model, 08 lens)
+├── notebooks/                      # Thin orchestration shells (00 runner, 01–07 per model, 08 lens)
 ├── pyproject.toml
 ├── LICENSE
 └── README.md
@@ -249,6 +250,40 @@ accuracy, margins, paired social-preamble effects with bootstrap CIs,
 generation–geometry concordance, and the UMAP trustworthiness sweep) and
 renders the figures. `visualize` renders the per-board heatmaps and 2D
 projections. Both require the optional plotting stack: `pip install -e ".[viz]"`.
+
+### Remote execution
+
+GPU stages can also be driven from a terminal, through a job queue that lives in
+the same Drive folder as the run outputs. This removes the per-run notebook
+editing: the model, sample size, and conditions travel in the job, not in a cell.
+
+Open `notebooks/00_runner.ipynb` in Colab, select an A100 runtime, and run all
+cells. The final cell blocks, polling `MyDrive/Codenames-Research/_jobs` for
+work. It exits after 30 idle minutes so an unused session stops consuming
+compute units, and reports the GPU it actually received — jobs submitted with
+`--expect-gpu` are refused before touching data if the session came up on
+something else.
+
+From a local checkout with the client extra installed (`pip install -e ".[remote]"`):
+
+```bash
+codenames-experiment job-submit --git-ref probing --expect-gpu A100 \
+    -- lens-extract --model mistral --full --conditions no_social
+codenames-experiment job-status --watch
+codenames-experiment job-logs   --job <job_id> --tail 40
+codenames-experiment job-cancel --job <job_id>
+codenames-experiment job-sync   --models mistral --skip-vectors
+```
+
+Only whitelisted subcommands may be executed by a runner (`run`, `lens-extract`,
+`lens-tune`, `doctor`, `sanity`, `preflight`, `validate`, `compare`): the queue
+is a folder in a personal Drive, and must not become a general remote-execution
+channel into it. Nothing is run through a shell.
+
+`job-sync` mirrors `<prefix>_outputs/` from Drive into `output/`, skipping files
+whose checksums already match. `--skip-vectors` omits the multi-GB `.npz`/`.npy`
+artifacts; since `codenames/viz` and the `boards`/`trust`/`examples` aggregate
+steps require them, that flag is for iteration only, never a final pull.
 
 ## Mapping the thesis to the code
 
