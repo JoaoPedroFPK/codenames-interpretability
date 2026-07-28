@@ -22,32 +22,56 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 _SUBDIRS = ("queue", "claimed", "status", "logs", "runner", "control")
 
 
+def cached_scopes(token_path: Path) -> set:
+    """Scopes the cached token actually holds, read straight from the file.
+
+    Deliberately not read via ``Credentials.from_authorized_user_file``: that
+    constructor reports the scopes *passed to it*, so asking it whether the
+    cached token is broad enough compares the request against itself and always
+    says yes.
+    """
+    try:
+        raw = json.loads(Path(token_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return set(raw.get("scopes") or [])
+
+
 def load_credentials(token_path: Path, client_secret_path: Path, *, scopes=DRIVE_SCOPES):
     """Load cached credentials, refreshing or re-consenting as needed.
 
     The token cached by the old read-only tooling carries a narrower scope, so
-    the first call after this feature lands triggers a consent screen.
+    the first call after this feature lands triggers a consent screen. Widening
+    a scope is never a refresh — Google rejects that with ``invalid_scope``.
     """
+    import google_auth_oauthlib.flow
+    from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
 
     token_path = Path(token_path)
     creds = None
-    if token_path.exists():
+    if set(scopes) <= cached_scopes(token_path):
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), scopes)
         except ValueError:
-            creds = None  # cached token was issued for different scopes
+            creds = None
 
-    has_scope = creds is not None and set(scopes) <= set(creds.scopes or [])
-    if creds and creds.valid and has_scope:
-        return creds
-    if creds and has_scope and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file(str(client_secret_path), scopes)
-        creds = flow.run_local_server(port=0)
+    if creds is not None:
+        if creds.valid:
+            return creds
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                token_path.write_text(creds.to_json(), encoding="utf-8")
+                return creds
+            except RefreshError:
+                creds = None  # revoked or otherwise unusable; fall through
+
+    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+        str(client_secret_path), scopes
+    )
+    creds = flow.run_local_server(port=0)
     token_path.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
