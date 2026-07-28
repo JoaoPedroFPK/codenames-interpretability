@@ -332,3 +332,47 @@ def test_report_surfaces_the_p5_diagnostics():
     report = pilot_report(_p5_base(P5_n_sites=780)).set_index("check")
     assert report.loc["P5_n_high", "observed"] == 12
     assert report.loc["P5_n_sites", "observed"] == 780
+
+
+# --- P1 not-applicable for the random-init null (amended 2026-07-28) --------
+
+def test_p1_not_applicable_does_not_block():
+    """The random-init null has no generations: P1 asks whether p* reproduces
+    the model's own greedy output, and an untrained model has no meaningful
+    output to reproduce. P7 is what matters for that arm."""
+    r = {"P1": 0.0, "P1_applicable": False, "P2": 1.0, "P3": 0.0,
+         "P4_flip": 0.577, "P4_sign": 0.9, "P4_clean_accuracy": 0.6,
+         "P5_rho": 0.7, "P5_fnr": 0.1, "P5_n_high_effect": 12,
+         "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    v = pilot_verdict(r)
+    assert "P1" not in v["blocking_failures"]
+    assert v["launch_full_run"] is True
+
+
+def test_p1_still_blocks_when_it_is_applicable():
+    """A trained model with a bad P1 must still fail - this is what caught the
+    re-encoded-prefix bug."""
+    r = {"P1": 0.0, "P1_applicable": True, "P2": 1.0, "P3": 0.0,
+         "P4_flip": 0.577, "P4_sign": 0.9, "P4_clean_accuracy": 0.6,
+         "P5_rho": 0.7, "P5_fnr": 0.1, "P5_n_high_effect": 12,
+         "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    assert "P1" in pilot_verdict(r)["blocking_failures"]
+
+
+def test_p1_defaults_to_applicable():
+    """Absent the flag, P1 is treated as a real check - never skipped by
+    accident. A missing generations file must fail loudly, not silently pass."""
+    r = {"P1": 0.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.9,
+         "P4_clean_accuracy": 0.6, "P5_rho": 0.7, "P5_fnr": 0.1,
+         "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True}
+    assert "P1" in pilot_verdict(r)["blocking_failures"]
+
+
+def test_report_marks_p1_not_applicable():
+    r = {"P1": 0.0, "P1_applicable": False, "P2": 1.0, "P3": 0.0,
+         "P4_flip": 0.577, "P4_sign": 0.9, "P4_clean_accuracy": 0.6,
+         "P5_rho": 0.7, "P5_fnr": 0.1, "P5_n_high_effect": 12,
+         "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    row = pilot_report(r).set_index("check").loc["P1"]
+    assert row["observed"] == "n/a"

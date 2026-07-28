@@ -55,7 +55,10 @@ def pilot_verdict(results: Dict[str, float]) -> Dict[str, object]:
     t = PILOT_THRESHOLDS
     failed: List[str] = []
 
-    if float(results.get("P1", 0.0)) < t["P1"]:
+    # P1 is skippable ONLY when explicitly marked inapplicable (the random-init
+    # null has no generations). It defaults to applicable so a missing
+    # generations file fails loudly instead of quietly passing.
+    if results.get("P1_applicable", True) and float(results.get("P1", 0.0)) < t["P1"]:
         failed.append("P1")
     if not (t["P2_lo"] <= float(results.get("P2", 0.0)) <= t["P2_hi"]):
         failed.append("P2")
@@ -103,7 +106,10 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
 
     rows = [
         {"check": "P1", "what": "p* reproduces the generated token",
-         "observed": results.get("P1"), "threshold": f">= {t['P1']}",
+         "observed": (results.get("P1") if results.get("P1_applicable", True)
+                      else "n/a"),
+         "threshold": (f">= {t['P1']}" if results.get("P1_applicable", True)
+                       else "n/a - no generations (random-init null)"),
          "passed": "P1" not in failed, "blocking": True},
         {"check": "P2", "what": "full-stack patch identity (e == 1)",
          "observed": results.get("P2"),
@@ -172,7 +178,7 @@ def run_pilot(
     model,
     tokenizer,
     df_sample: pd.DataFrame,
-    generation_csv: str,
+    generation_csv: Optional[str],
     base_dir: str,
     prefix: str,
     mode: str,
@@ -213,7 +219,8 @@ def run_pilot(
 
     os.makedirs(base_dir, exist_ok=True)
     mode_flag = mode == "with_social"
-    generations = pd.read_csv(generation_csv).set_index("row_id")
+    generations = (pd.read_csv(generation_csv).set_index("row_id")
+                   if generation_csv else None)
 
     hint_tokens = {
         int(r.row_id): len(tokenizer.encode(str(r.output), add_special_tokens=False))
@@ -274,7 +281,7 @@ def run_pilot(
 
         # --- P1: does p* land on the recorded generated token?
         p_star = -1
-        if pair.row_id in generations.index:
+        if generations is not None and pair.row_id in generations.index:
             row = generations.loc[pair.row_id]
             text, word = row.get("generated_text"), row.get("generated_word")
             if isinstance(text, str) and isinstance(word, str):
@@ -423,6 +430,7 @@ def run_pilot(
 
     results: Dict[str, float] = {
         "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
+        "P1_applicable": generation_csv is not None,
         "P2": float(np.nanmean(e_full)) if e_full else 0.0,
         "P3": float(np.nanmean(e_null)) if e_null else 1.0,
         "P4_flip": float(np.mean(flips)) if flips else 0.0,

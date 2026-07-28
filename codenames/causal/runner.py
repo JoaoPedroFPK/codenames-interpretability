@@ -194,8 +194,12 @@ def cmd_pilot(args) -> int:
     model, tokenizer, meta = _load_model(args.model)
     df = _sample(args.dataset, args.sample_size, args.seed)
 
-    generation_csv = getattr(args, "generation_csv", None)
-    if generation_csv is None:
+    if getattr(args, "no_generations", False):
+        # Explicit opt-out only (random-init null). P1 is reported as n/a.
+        generation_csv = None
+    else:
+        generation_csv = getattr(args, "generation_csv", None)
+    if generation_csv is None and not getattr(args, "no_generations", False):
         generation_csv = os.path.join(
             paths["base"], f"{paths['prefix']}_generation_{args.condition}.csv")
     if not os.path.exists(generation_csv):

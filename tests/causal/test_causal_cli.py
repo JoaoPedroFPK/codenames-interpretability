@@ -128,3 +128,17 @@ def test_patch_exposes_a_resume_flag():
                                       "--output-dir", "/tmp/x",
                                       "--dataset", "/tmp/d.csv", "--resume"])
     assert args.resume is True
+
+
+def test_pilot_exposes_an_explicit_no_generations_optout():
+    args = build_parser().parse_args(["causal-pilot", "--model", "qwen_random",
+                                      "--output-dir", "/tmp/x",
+                                      "--dataset", "/tmp/d.csv", "--no-generations"])
+    assert args.no_generations is True
+
+
+def test_no_generations_defaults_false_so_a_missing_file_still_errors():
+    args = build_parser().parse_args(["causal-pilot", "--model", "mistral",
+                                      "--output-dir", "/tmp/x",
+                                      "--dataset", "/tmp/d.csv"])
+    assert args.no_generations is False

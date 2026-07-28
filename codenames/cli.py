@@ -1648,6 +1648,10 @@ def _make_causal_pilot_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--generation-csv", default=None,
                    help="Recorded generations, needed by check P1. Defaults to "
                         "{output-dir}/{prefix}_generation_{condition}.csv.")
+    p.add_argument("--no-generations", action="store_true",
+                   help="Skip check P1 because this model has no recorded "
+                        "generations (the random-init null). Must be explicit: "
+                        "a merely missing file is an error, not a free skip.")
     p.add_argument("--report-path", default=None,
                    help="Where to write the P1-P8 table (default: output dir).")
     return p
