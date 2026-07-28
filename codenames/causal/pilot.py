@@ -41,6 +41,14 @@ PILOT_THRESHOLDS = {
 
 _BLOCKING = ("P1", "P2", "P3", "P4", "P7")
 
+# P5 instrument (amended 2026-07-28). Stratified sampling: the screen's own
+# top picks give the correlation dynamic range, the random cells make the
+# false-negative rate estimable. Sites below this |e| are treated as null,
+# so "the screen missed it" means it missed something that actually mattered.
+_P5_TOP = 3
+_P5_RANDOM = 3
+_P5_EFFECT_FLOOR = 0.10
+
 
 def pilot_verdict(results: Dict[str, float]) -> Dict[str, object]:
     """Route P1-P8 observations into the §12.5 launch decision."""
@@ -64,7 +72,12 @@ def pilot_verdict(results: Dict[str, float]) -> Dict[str, object]:
     if not bool(results.get("P7_finite", False)):
         failed.append("P7")
 
-    attribution_lost = (
+    # An FNR computed over zero high-effect sites is not evidence that the
+    # screen works -- it means the sample never contained anything to miss.
+    # Report that as uninformative rather than letting it read as a pass.
+    n_high = int(results.get("P5_n_high_effect", 0) or 0)
+    attribution_uninformative = n_high == 0
+    attribution_lost = (not attribution_uninformative) and (
         float(results.get("P5_rho", 0.0)) < t["P5_rho"]
         or float(results.get("P5_fnr", 1.0)) > t["P5_fnr"]
     )
@@ -77,6 +90,7 @@ def pilot_verdict(results: Dict[str, float]) -> Dict[str, object]:
         "launch_full_run": len(failed) == 0,
         "blocking_failures": failed,
         "attribution_shortcut_lost": bool(attribution_lost),
+        "attribution_uninformative": bool(attribution_uninformative),
         "rq2_bounded_negative": bool(rq2_bounded),
     }
 
@@ -136,6 +150,15 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
              float(results.get("P4_flip", 0.0)) / results["P4_clean_accuracy"]
              if results.get("P4_clean_accuracy") else None),
          "threshold": "diagnostic only - NOT a gate",
+         "passed": True, "blocking": False},
+        {"check": "P5_fnr", "what": "high-effect sites the screen would miss",
+         "observed": results.get("P5_fnr"), "threshold": f"<= {t['P5_fnr']}",
+         "passed": not verdict["attribution_shortcut_lost"], "blocking": False},
+        {"check": "P5_n_high", "what": "sites clearing the |e| floor (0 = uninformative)",
+         "observed": results.get("P5_n_high_effect"), "threshold": "recorded",
+         "passed": not verdict["attribution_uninformative"], "blocking": False},
+        {"check": "P5_n_sites", "what": "sites real-patched for the P5 estimate",
+         "observed": results.get("P5_n_sites"), "threshold": "recorded",
          "passed": True, "blocking": False},
         {"check": "P8_wall", "what": "throughput incl. backward + generation",
          "observed": results.get("P8_wall_fwd_per_s"), "threshold": "recorded",
@@ -231,6 +254,7 @@ def run_pilot(
     clean_correct = []         # model answers its own clean hint -> P4 denominator
 
     misaligned = 0
+    rng = np.random.default_rng(seed)
     for pair in pairs.itertuples():
         clean_prompt = _prompt(pair.row_id, pair.hint)
         corrupt_prompt = _prompt(pair.row_id, pair.donor_hint)
@@ -331,13 +355,26 @@ def run_pilot(
             clean_target=pair.clean_target, donor_target=pair.donor_target,
             p_star=p_star, device=device,
         )
-        rng = np.random.default_rng(seed)
-        for layer in rng.choice(len(cache), size=min(3, len(cache)), replace=False):
-            position = int(rng.integers(n_positions))
-            real = run_patch(sites=[(int(layer), position)], **shared)
+        # Stratified: the screen's own top picks PLUS random cells. A
+        # random-only sample is range-restricted -- nearly every cell is null,
+        # so both axes are noise and the correlation is uninformative. The
+        # random stratum is what makes the false-negative rate estimable; the
+        # top stratum is what gives the correlation any dynamic range.
+        flat = np.abs(grid).ravel()
+        n_top = min(_P5_TOP, flat.size)
+        top_flat = np.argpartition(flat, -n_top)[-n_top:]
+        top_sites = [tuple(int(v) for v in np.unravel_index(i, grid.shape))
+                     for i in top_flat]
+        rand_sites = [(int(rng.integers(grid.shape[0])), int(rng.integers(n_positions)))
+                      for _ in range(_P5_RANDOM)]
+
+        for site, stratum in ([(s_, "top") for s_ in top_sites]
+                              + [(s_, "random") for s_ in rand_sites]):
+            real = run_patch(sites=[site], **shared)
             forwards += 1
             if np.isfinite(real):
-                attribution_pairs.append((float(grid[int(layer), position]), real))
+                attribution_pairs.append(
+                    (float(grid[site[0], site[1]]), real, stratum))
 
     elapsed = max(time.perf_counter() - started, 1e-9)
 
@@ -356,16 +393,33 @@ def run_pilot(
             steer_generate(direction=direction, alpha=float(alpha), **base_kwargs) != unsteered
         )
 
-    rho, fnr = 0.0, 1.0
-    if len(attribution_pairs) >= 3:
-        approx, real = np.array(attribution_pairs).T
+    rho, fnr, n_high = 0.0, 1.0, 0
+    if len(attribution_pairs) >= 6:
+        approx = np.array([a for a, _, _ in attribution_pairs], dtype=float)
+        real = np.array([r for _, r, _ in attribution_pairs], dtype=float)
+        strata = np.array([s_ for _, _, s_ in attribution_pairs])
+
         if np.std(approx) > 0 and np.std(real) > 0:
             from scipy.stats import spearmanr
 
             rho = float(spearmanr(approx, real).statistic)
-        strong = np.abs(real) > np.median(np.abs(real))
-        screened = np.abs(approx) > np.median(np.abs(approx))
-        fnr = float(np.mean(strong & ~screened)) if strong.any() else 0.0
+
+        # False-negative rate: of the sites that genuinely matter, what share
+        # would the screen have passed over? "Matters" is an absolute cut on
+        # the normalised effect, not a quantile -- a quantile guarantees a
+        # fixed count of "high" sites even when none of them matter.
+        # The operating point is the weakest attribution the screen would keep.
+        operating_point = (np.abs(approx[strata == "top"]).min()
+                           if (strata == "top").any() else np.inf)
+        high = np.abs(real) >= _P5_EFFECT_FLOOR
+        n_high = int(high.sum())
+        if n_high:
+            missed = high & (np.abs(approx) < operating_point)
+            fnr = float(missed.sum() / n_high)
+        else:
+            # No site in the sample cleared the floor, so the screen cannot
+            # have missed one. Report 0 and flag the sample as uninformative.
+            fnr = 0.0
 
     results: Dict[str, float] = {
         "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
@@ -375,6 +429,8 @@ def run_pilot(
         "P4_sign": float(np.mean(np.array(ld_corrupts) < 0)) if ld_corrupts else 0.0,
         "P5_rho": rho,
         "P5_fnr": fnr,
+        "P5_n_high_effect": n_high,
+        "P5_n_sites": len(attribution_pairs),
         "P6_change": float(np.mean(changed)) if changed else 0.0,
         "P6_parse": 1.0,
         "P7_finite": bool(np.isfinite(np.array(e_full, dtype=float)).all()),

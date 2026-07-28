@@ -8,7 +8,8 @@ from codenames.causal.pilot import PILOT_THRESHOLDS, pilot_report, pilot_verdict
 def _results(**overrides):
     base = {
         "P1": 1.00, "P2": 1.00, "P3": 0.00, "P4_flip": 0.55, "P4_sign": 0.90, "P4_clean_accuracy": 0.60,
-        "P5_rho": 0.70, "P5_fnr": 0.10, "P6_change": 0.30, "P6_parse": 0.95,
+        "P5_rho": 0.70, "P5_fnr": 0.10, "P5_n_high_effect": 12,
+        "P6_change": 0.30, "P6_parse": 0.95,
         "P7_finite": True, "P8_fwd_per_s": 54.0,
     }
     base.update(overrides)
@@ -274,3 +275,60 @@ def test_p4_sign_still_blocks_independently():
                 "P4_clean_accuracy": 0.600, "P5_rho": 0.7, "P5_fnr": 0.1,
                 "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
     assert "P4" in pilot_verdict(bad_sign)["blocking_failures"]
+
+
+# --- P5 instrument (amended 2026-07-28) ------------------------------------
+
+def _p5_base(**over):
+    r = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.9,
+         "P4_clean_accuracy": 0.6, "P5_rho": 0.7, "P5_fnr": 0.1,
+         "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True}
+    r.update(over)
+    return r
+
+
+def test_p5_zero_high_effect_sites_is_uninformative_not_a_pass():
+    """An FNR over zero high-effect sites means nothing was there to miss."""
+    v = pilot_verdict(_p5_base(P5_n_high_effect=0, P5_fnr=0.0, P5_rho=0.0))
+    assert v["attribution_uninformative"] is True
+    assert v["attribution_shortcut_lost"] is False   # not claimed either way
+    assert v["launch_full_run"] is True              # still non-blocking
+
+
+def test_p5_high_fnr_loses_the_shortcut():
+    v = pilot_verdict(_p5_base(P5_fnr=0.9))
+    assert v["attribution_shortcut_lost"] is True
+    assert v["attribution_uninformative"] is False
+
+
+def test_p5_good_fnr_and_rho_keeps_the_shortcut():
+    assert pilot_verdict(_p5_base())["attribution_shortcut_lost"] is False
+
+
+def test_p5_sampling_is_stratified_and_rng_is_not_reseeded_per_pair():
+    """Two bugs at once: random-only sampling had no dynamic range, and the
+    generator was re-created inside the loop so every pair drew identical sites.
+    """
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert "top_sites" in src and "rand_sites" in src
+    body = src.split("for pair in pairs.itertuples():", 1)[1]
+    assert "np.random.default_rng(seed)" not in body, "rng re-seeded inside the loop"
+
+
+def test_p5_effect_floor_is_absolute_not_a_quantile():
+    """A quantile cut guarantees 'high-effect' sites exist even when none do."""
+    import inspect
+    from codenames.causal import pilot
+    assert pilot._P5_EFFECT_FLOOR > 0
+    src = inspect.getsource(pilot.run_pilot)
+    assert "_P5_EFFECT_FLOOR" in src
+    assert "np.median(np.abs(real))" not in src
+
+
+def test_report_surfaces_the_p5_diagnostics():
+    report = pilot_report(_p5_base(P5_n_sites=780)).set_index("check")
+    assert report.loc["P5_n_high", "observed"] == 12
+    assert report.loc["P5_n_sites", "observed"] == 780
