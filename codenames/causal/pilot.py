@@ -28,6 +28,11 @@ import pandas as pd
 
 PILOT_THRESHOLDS = {
     "P1": 0.99,                        # p* reproduces the recorded generated token
+    # A miss counts only when the model DECISIVELY prefers another token.
+    # P1 exists to validate p* INDEXING; a weak-preference argmax flip
+    # between the accelerated generation path and the reference path is
+    # numerical drift, not a mis-index. Amended 2026-07-28 (§12.5).
+    "P1_decisive_margin": 1.0,
     "P2_lo": 0.98, "P2_hi": 1.02,      # full-stack patch identity: e == 1
     "P3": 0.02,                        # null patch identity: |e| == 0
     # P4 amended 2026-07-28 (causal_spec.md §12.5): the flip criterion is
@@ -166,6 +171,12 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P5_n_sites", "what": "sites real-patched for the P5 estimate",
          "observed": results.get("P5_n_sites"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P1_raw", "what": "raw agreement, counting near-tie flips too",
+         "observed": results.get("P1_raw"), "threshold": "diagnostic only",
+         "passed": True, "blocking": False},
+        {"check": "P1_decisive", "what": "misses with a decisive margin (indexing faults)",
+         "observed": results.get("P1_n_decisive_misses"), "threshold": "recorded",
+         "passed": True, "blocking": False},
         {"check": "P1_margin",
          "what": "median logit margin on P1 misses (small = numerical drift)",
          "observed": results.get("P1_miss_margin_median"),
@@ -271,7 +282,7 @@ def run_pilot(
         raise ValueError("no valid counterfactual pairs in the pilot sample")
 
     p1_hits, flips, ld_corrupts = [], [], []
-    p1_margins = []
+    p1_margins, p1_decisive_misses = [], []
     e_full, e_null, attribution_pairs = [], [], []
     denominators = []
     started, forwards = time.perf_counter(), 0
@@ -324,13 +335,17 @@ def run_pilot(
                     actual = int(ids[position])
                     hit = predicted == actual
                     p1_hits.append(hit)
+                    margin = float(row_logits[predicted] - row_logits[actual])
                     if not hit:
                         # Margin between what the model predicts and what the
                         # recording holds. A near-tie means numerical drift
                         # (the generations were produced on an accelerated
                         # path); a wide margin means something structural.
-                        p1_margins.append(
-                            float(row_logits[predicted] - row_logits[actual]))
+                        p1_margins.append(margin)
+                        # Decisive misses are the ones that indicate a real
+                        # indexing fault rather than a near-tie flip.
+                        if margin >= PILOT_THRESHOLDS["P1_decisive_margin"]:
+                            p1_decisive_misses.append(margin)
                     forwards += 1
 
         clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
@@ -458,7 +473,10 @@ def run_pilot(
             fnr = 0.0
 
     results: Dict[str, float] = {
-        "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
+        # Gated statistic: agreement counting only DECISIVE misses.
+        "P1": (1.0 - len(p1_decisive_misses) / len(p1_hits)) if p1_hits else 0.0,
+        "P1_raw": float(np.mean(p1_hits)) if p1_hits else 0.0,
+        "P1_n_decisive_misses": int(len(p1_decisive_misses)),
         "P1_applicable": generation_csv is not None,
         "P1_miss_margin_median": (float(np.median(p1_margins))
                                   if p1_margins else 0.0),

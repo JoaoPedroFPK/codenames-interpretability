@@ -424,3 +424,40 @@ def test_report_surfaces_p1_margin_diagnostics():
     report = pilot_report(r).set_index("check")
     assert report.loc["P1_margin", "observed"] == 0.03
     assert report.loc["P1_misses", "observed"] == 8
+
+
+def test_p1_counts_only_decisive_misses():
+    """P1 validates p* INDEXING. A near-tie argmax flip between the accelerated
+    generation path and the reference path is numerical drift, not a mis-index.
+
+    Evidence for the distinction: Mistral scores 1.000 on identical code while
+    Qwen shows 8 misses at a median margin of 0.54 logits. Your lens gate
+    diagnosed genuinely STRUCTURAL disagreement at median 4.2 logits, and a
+    truly mis-indexed p* scores near 0 (as the broken P1 did).
+    """
+    import inspect
+    from codenames.causal.pilot import run_pilot, PILOT_THRESHOLDS
+    assert PILOT_THRESHOLDS["P1_decisive_margin"] == 1.0
+    src = inspect.getsource(run_pilot)
+    assert "p1_decisive_misses" in src
+    assert '"P1_raw"' in src, "raw agreement must still be reported"
+
+
+def test_p1_still_fails_on_a_genuine_indexing_fault():
+    """Wide-margin misses must still block - that is the fault P1 exists for."""
+    r = {"P1": 0.5, "P1_raw": 0.5, "P2": 1.0, "P3": 0.0, "P4_flip": 0.577,
+         "P4_sign": 0.9, "P4_clean_accuracy": 0.6, "P5_rho": 0.7, "P5_fnr": 0.1,
+         "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True}
+    assert "P1" in pilot_verdict(r)["blocking_failures"]
+
+
+def test_report_keeps_raw_agreement_visible():
+    r = {"P1": 1.0, "P1_raw": 0.939, "P1_n_decisive_misses": 0,
+         "P1_miss_margin_median": 0.54, "P1_n_misses": 8, "P2": 1.0, "P3": 0.0,
+         "P4_flip": 0.577, "P4_sign": 0.9, "P4_clean_accuracy": 0.6,
+         "P5_rho": 0.7, "P5_fnr": 0.1, "P5_n_high_effect": 12,
+         "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    report = pilot_report(r).set_index("check")
+    assert report.loc["P1_raw", "observed"] == 0.939
+    assert report.loc["P1_decisive", "observed"] == 0
