@@ -155,3 +155,11 @@ def test_every_steering_arm_shares_the_same_norm_relative_scale(tiny):
     # one scale per turn, shared by every arm at that turn
     per_turn = out.groupby("row_id")["residual_scale"].nunique()
     assert (per_turn == 1).all()
+
+
+def test_scan_per_layer_returns_one_locus_per_depth(tiny):
+    """The causal CURVE needs a locus at every layer; a global top-k can all
+    land at one depth and produce no curve at all."""
+    grid, loci = run_scan_stage(**_common(tiny), per_layer=True)
+    assert len(loci) == grid.shape[0]
+    assert sorted(loci["layer"]) == list(range(grid.shape[0]))

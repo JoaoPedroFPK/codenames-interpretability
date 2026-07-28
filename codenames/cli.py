@@ -1586,6 +1586,10 @@ def _make_causal_scan_parser(sp) -> argparse.ArgumentParser:
                    choices=["no_social", "with_social"])
     p.add_argument("--top-k", type=int, default=200,
                    help="Loci carried into stage 2 (budget ceiling, not a prediction).")
+    p.add_argument("--per-layer", action="store_true",
+                   help="Select the strongest position at EACH layer instead of "
+                        "the global top-k, yielding a causal-effect curve over "
+                        "depth for the triangulation figure.")
     return p
 
 

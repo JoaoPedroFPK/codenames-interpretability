@@ -123,6 +123,7 @@ def cmd_scan(args) -> int:
         model=model, tokenizer=tokenizer, df_sample=df,
         chat_template_strategy=meta["chat_template_strategy"],
         mode=args.condition, seed=args.seed, top_k=args.top_k,
+        per_layer=bool(getattr(args, 'per_layer', False)),
     )
     np.save(paths["scan"], grid)
     loci_path = paths["scan"].replace(".npy", "_loci.csv")

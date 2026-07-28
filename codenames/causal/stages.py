@@ -93,7 +93,7 @@ class _Context:
 
 def run_scan_stage(
     *, model, tokenizer, df_sample, chat_template_strategy, mode, seed,
-    top_k: int = 200, device: Optional[str] = None,
+    top_k: int = 200, per_layer: bool = False, device: Optional[str] = None,
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """Attribution screen over the grid; returns the mean grid and ranked loci.
 
@@ -123,7 +123,15 @@ def run_scan_stage(
         raise ValueError("no aligned pairs; cannot run the attribution scan")
 
     mean_grid = total / counted
-    sites = top_sites(mean_grid, k=top_k)
+    if per_layer:
+        # One locus per layer: the strongest position at each depth. This is
+        # what yields a causal-effect CURVE over depth (RQ1 / the triangulation
+        # figure) rather than a scatter of globally-strongest cells, which can
+        # all sit at one depth.
+        sites = [(int(layer), int(np.argmax(np.abs(mean_grid[layer]))))
+                 for layer in range(mean_grid.shape[0])]
+    else:
+        sites = top_sites(mean_grid, k=top_k)
     loci = pd.DataFrame(
         [{"layer": l, "position": p, "score": float(mean_grid[l, p])}
          for l, p in sites]
