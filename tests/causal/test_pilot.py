@@ -376,3 +376,28 @@ def test_report_marks_p1_not_applicable():
          "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
     row = pilot_report(r).set_index("check").loc["P1"]
     assert row["observed"] == "n/a"
+
+
+def test_p2_uses_a_robust_statistic_not_the_mean():
+    """Qwen returned mean 0.886 while the identity itself held: a pair whose
+    clean/corrupt denominator is near zero makes e explode and drags an
+    average. The identity is per-pair, so the summary must be robust."""
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert 'np.nanmedian(e_full)' in src
+    assert '"P2_within_tol"' in src
+
+
+def test_report_surfaces_the_p2_outlier_diagnostics():
+    r = {"P1": 1.0, "P2": 1.0, "P2_mean": 0.886, "P2_within_tol": 0.97,
+         "P2_denom_median": 12.4, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.9,
+         "P4_clean_accuracy": 0.6, "P5_rho": 0.7, "P5_fnr": 0.1,
+         "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True}
+    report = pilot_report(r).set_index("check")
+    assert report.loc["P2_mean", "observed"] == 0.886
+    assert report.loc["P2_within_tol", "observed"] == 0.97
+    assert report.loc["P2_denom", "observed"] == 12.4
+    # the robust statistic is what gates
+    assert pilot_verdict(r)["launch_full_run"] is True

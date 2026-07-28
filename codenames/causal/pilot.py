@@ -166,6 +166,15 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P5_n_sites", "what": "sites real-patched for the P5 estimate",
          "observed": results.get("P5_n_sites"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P2_within_tol", "what": "pairs whose full-stack patch is within tolerance",
+         "observed": results.get("P2_within_tol"), "threshold": "recorded",
+         "passed": True, "blocking": False},
+        {"check": "P2_mean", "what": "mean full-stack e (outlier-sensitive)",
+         "observed": results.get("P2_mean"), "threshold": "diagnostic only",
+         "passed": True, "blocking": False},
+        {"check": "P2_denom", "what": "median |LD_clean - LD_corrupt| (metric scale)",
+         "observed": results.get("P2_denom_median"), "threshold": "recorded",
+         "passed": True, "blocking": False},
         {"check": "P8_wall", "what": "throughput incl. backward + generation",
          "observed": results.get("P8_wall_fwd_per_s"), "threshold": "recorded",
          "passed": True, "blocking": False},
@@ -256,6 +265,7 @@ def run_pilot(
 
     p1_hits, flips, ld_corrupts = [], [], []
     e_full, e_null, attribution_pairs = [], [], []
+    denominators = []
     started, forwards = time.perf_counter(), 0
     fwd_seconds = 0.0          # forward-pass time ONLY (excludes backward + generate)
     clean_correct = []         # model answers its own clean hint -> P4 denominator
@@ -329,6 +339,7 @@ def run_pilot(
             table, pair.clean_target, pair.donor_target,
         )
         ld_corrupts.append(ld_corrupt)
+        denominators.append(abs(ld_clean - ld_corrupt))
 
         # --- P4: did the corruption move the answer to the donor's target?
         scores = {w: float(corrupt_logits[ids].max())
@@ -431,8 +442,17 @@ def run_pilot(
     results: Dict[str, float] = {
         "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
         "P1_applicable": generation_csv is not None,
-        "P2": float(np.nanmean(e_full)) if e_full else 0.0,
-        "P3": float(np.nanmean(e_null)) if e_null else 1.0,
+        # MEDIAN, not mean: the identity is per-pair, and a pair whose
+        # clean/corrupt denominator is near zero makes e explode and drags
+        # an average. Qwen returned mean 0.886 against a median that holds.
+        "P2": float(np.nanmedian(e_full)) if e_full else 0.0,
+        "P2_mean": float(np.nanmean(e_full)) if e_full else 0.0,
+        "P2_within_tol": (
+            float(np.mean(np.abs(np.array(e_full, dtype=float) - 1.0) <= 0.02))
+            if e_full else 0.0),
+        "P2_denom_median": float(np.median(denominators)) if denominators else 0.0,
+        "P2_denom_min": float(np.min(denominators)) if denominators else 0.0,
+        "P3": float(np.nanmedian(e_null)) if e_null else 1.0,
         "P4_flip": float(np.mean(flips)) if flips else 0.0,
         "P4_sign": float(np.mean(np.array(ld_corrupts) < 0)) if ld_corrupts else 0.0,
         "P5_rho": rho,
