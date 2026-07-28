@@ -1321,7 +1321,7 @@ def _make_job_submit_parser(sp: "argparse._SubParsersAction") -> argparse.Argume
         ),
     )
     _add_store_args(p)
-    p.add_argument("--git-ref", default="feat/remote-execution",
+    p.add_argument("--git-ref", default="remote-execution",
                    help="Git ref the runner checks out before running the job.")
     p.add_argument("--timeout", type=int, default=6 * 3600,
                    help="Job timeout in seconds.")

@@ -267,7 +267,7 @@ something else.
 From a local checkout with the client extra installed (`pip install -e ".[remote]"`):
 
 ```bash
-codenames-experiment job-submit --git-ref feat/remote-execution --expect-gpu A100 \
+codenames-experiment job-submit --git-ref remote-execution --expect-gpu A100 \
     -- lens-extract --model mistral --full --conditions no_social
 codenames-experiment job-status --watch
 codenames-experiment job-logs   --job <job_id> --tail 40
