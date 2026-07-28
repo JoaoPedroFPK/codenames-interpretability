@@ -111,24 +111,76 @@ def cmd_extract(args) -> int:
 
 
 def cmd_scan(args) -> int:
-    raise NotImplementedError(
-        "causal-scan orchestration is not built yet; the attribution primitive "
-        "is available and tested at codenames.causal.attribution.attribution_scan"
+    """Stage 1: attribution screen. Carries no inferential claim (§3.4)."""
+    from .stages import run_scan_stage
+
+    paths = _paths(args)
+    os.makedirs(paths["base"], exist_ok=True)
+    model, tokenizer, meta = _load_model(args.model)
+    df = _sample(args.dataset, getattr(args, "sample_size", None), args.seed)
+
+    grid, loci = run_scan_stage(
+        model=model, tokenizer=tokenizer, df_sample=df,
+        chat_template_strategy=meta["chat_template_strategy"],
+        mode=args.condition, seed=args.seed, top_k=args.top_k,
     )
+    np.save(paths["scan"], grid)
+    loci_path = paths["scan"].replace(".npy", "_loci.csv")
+    loci.to_csv(loci_path, index=False)
+    print(f"  grid {grid.shape} -> {paths['scan']}")
+    print(f"  {len(loci)} candidate loci (SCREEN ONLY) -> {loci_path}")
+    return 0
 
 
 def cmd_patch(args) -> int:
-    raise NotImplementedError(
-        "causal-patch orchestration is not built yet; the patching primitive "
-        "is available and tested at codenames.causal.patch.run_patch"
+    """Stage 2: real patches on the candidate loci. The evidence stage."""
+    from .stages import run_patch_stage
+
+    paths = _paths(args)
+    os.makedirs(paths["base"], exist_ok=True)
+    loci_path = paths["scan"].replace(".npy", "_loci.csv")
+    if not os.path.exists(loci_path):
+        raise FileNotFoundError(
+            f"no candidate loci at {loci_path}; run causal-scan first")
+    loci = pd.read_csv(loci_path)
+
+    model, tokenizer, meta = _load_model(args.model)
+    df = _sample(args.dataset, args.sample_size, args.seed)
+    widths = tuple(int(w) for w in str(args.window_widths).split(",") if w.strip())
+
+    effects = run_patch_stage(
+        model=model, tokenizer=tokenizer, df_sample=df,
+        chat_template_strategy=meta["chat_template_strategy"],
+        mode=args.condition, seed=args.seed, loci=loci, window_widths=widths,
     )
+    effects.to_parquet(paths["effects"], index=False)
+    finite = int(effects["effect"].notna().sum())
+    print(f"  {len(effects)} patch measurements ({finite} finite) "
+          f"over {effects['row_id'].nunique()} turns -> {paths['effects']}")
+    return 0
 
 
 def cmd_steer(args) -> int:
-    raise NotImplementedError(
-        "causal-steer orchestration is not built yet; the steering primitives "
-        "are available and tested at codenames.causal.steer"
+    """Stage 3: dose-response with the four pre-registered control arms."""
+    from .stages import run_steer_stage
+
+    paths = _paths(args)
+    os.makedirs(paths["base"], exist_ok=True)
+    model, tokenizer, meta = _load_model(args.model)
+    df = _sample(args.dataset, args.sample_size, args.seed)
+    alphas = tuple(float(a) for a in str(args.alphas).split(",") if a.strip())
+
+    out = run_steer_stage(
+        model=model, tokenizer=tokenizer, df_sample=df,
+        chat_template_strategy=meta["chat_template_strategy"],
+        mode=args.condition, seed=args.seed, layer=args.layer,
+        alphas=alphas, sites=args.sites,
     )
+    out.to_csv(paths["steer"], index=False)
+    by_arm = out.groupby("arm")["changed"].mean().round(3).to_dict()
+    print(f"  {len(out)} generations -> {paths['steer']}")
+    print(f"  change rate by arm: {by_arm}")
+    return 0
 
 
 def cmd_pilot(args) -> int:

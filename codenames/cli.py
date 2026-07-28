@@ -1579,6 +1579,8 @@ def _make_causal_scan_parser(sp) -> argparse.ArgumentParser:
         ),
     )
     _add_causal_common(p)
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
     p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
@@ -1593,6 +1595,7 @@ def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
         help="Real patches on candidate loci (resumable; the expensive stage).",
     )
     _add_causal_common(p)
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
     p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
@@ -1613,6 +1616,9 @@ def _make_causal_steer_parser(sp) -> argparse.ArgumentParser:
     _add_causal_common(p)
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("--layer", type=int, required=True,
+                   help="Injection layer; sweep by submitting one job per layer.")
     p.add_argument("--direction", default="lens", choices=["lens", "dom"],
                    help="lens = label-free (primary); dom = label-fitted (robustness).")
     p.add_argument("--sites", default="from_hint",

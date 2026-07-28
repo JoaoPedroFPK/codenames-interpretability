@@ -38,7 +38,8 @@ def test_pilot_defaults_match_the_spec():
 
 def test_patch_defaults_to_the_confirmatory_sample_size():
     args = build_parser().parse_args(["causal-patch", "--model", "mistral",
-                                      "--output-dir", "/tmp/x"])
+                                      "--output-dir", "/tmp/x",
+                                      "--dataset", "/tmp/d.csv"])
     assert args.sample_size == 1500
     assert args.seed == 2026
 
@@ -74,15 +75,13 @@ def test_dispatch_routes_every_causal_command():
         assert name in runner._DISPATCH
 
 
-def test_unbuilt_stages_raise_not_implemented_rather_than_failing_oddly():
+def test_every_stage_is_built_and_routable():
     """Stages whose orchestration is not built must say so explicitly."""
     from codenames.causal import runner
     import argparse
-    for name in ("causal-scan", "causal-patch", "causal-steer"):
-        args = argparse.Namespace(command=name, model="mistral",
-                                  output_dir="/tmp/x", seed=2026)
-        with pytest.raises(NotImplementedError, match="not built yet"):
-            runner.dispatch(args)
+    # All stages are now built; dispatch must route each one.
+    for name in CAUSAL_COMMANDS:
+        assert callable(runner._DISPATCH[name])
 
 
 def test_help_does_not_import_torch():
