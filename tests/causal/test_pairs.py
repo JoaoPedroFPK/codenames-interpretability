@@ -85,3 +85,35 @@ def test_missing_hint_column_is_a_clear_error():
     import pytest
     with pytest.raises(KeyError, match="hint.*output"):
         hint_column(_frame().drop(columns=["hint"]))
+
+
+def test_prompt_aware_donor_selection_picks_an_aligned_donor():
+    """Real corpus: filtering misaligned pairs afterwards left only ~47%.
+
+    Selecting a donor whose assembled prompt already matches restores the
+    yield without inflating the sample size.
+    """
+    df = _frame()
+    # "a b c" assembles to a longer prompt; the selector must avoid it.
+    lengths = {"ocean": 10, "rocket": 10, "a b c": 14}
+
+    def prompt_len(row_id, hint):
+        return lengths[hint]
+
+    out = build_pair_table(df, {1: 1, 2: 1, 3: 1}, seed=2026,
+                           match_length=False, prompt_length_fn=prompt_len)
+    assert len(out) > 0
+    for r in out.itertuples():
+        assert prompt_len(r.row_id, r.hint) == prompt_len(r.row_id, r.donor_hint)
+
+
+def test_turns_with_no_aligned_donor_are_dropped():
+    df = _frame()
+    lengths = {"ocean": 10, "rocket": 99, "a b c": 98}   # nothing matches turn 1
+
+    def prompt_len(row_id, hint):
+        return lengths[hint]
+
+    out = build_pair_table(df, {1: 1, 2: 1, 3: 1}, seed=2026,
+                           match_length=False, prompt_length_fn=prompt_len)
+    assert 1 not in set(out["row_id"])

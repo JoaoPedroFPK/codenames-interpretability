@@ -186,10 +186,6 @@ def run_pilot(
         int(r.row_id): len(tokenizer.encode(str(r.output), add_special_tokens=False))
         for r in df_sample.itertuples()
     }
-    pairs = build_pair_table(df_sample, hint_tokens, seed=seed, match_length=True)
-    if pairs.empty:
-        raise ValueError("no valid counterfactual pairs in the pilot sample")
-
     by_id = df_sample.set_index("row_id")
 
     def _prompt(row_id: int, hint: str) -> str:
@@ -201,6 +197,22 @@ def run_pilot(
             chat_template_strategy=chat_template_strategy,
         )
         return text
+
+    _len_cache: Dict[tuple, int] = {}
+
+    def _prompt_len(row_id: int, hint: str) -> int:
+        key = (int(row_id), str(hint))
+        if key not in _len_cache:
+            _len_cache[key] = len(
+                tokenizer.encode(_prompt(row_id, hint), add_special_tokens=False))
+        return _len_cache[key]
+
+    # Prompt-aware donor selection: pick a donor whose ASSEMBLED prompt already
+    # matches in length, instead of filtering misaligned pairs afterwards.
+    pairs = build_pair_table(df_sample, hint_tokens, seed=seed, match_length=True,
+                             prompt_length_fn=_prompt_len)
+    if pairs.empty:
+        raise ValueError("no valid counterfactual pairs in the pilot sample")
 
     p1_hits, flips, ld_corrupts = [], [], []
     e_full, e_null, attribution_pairs = [], [], []

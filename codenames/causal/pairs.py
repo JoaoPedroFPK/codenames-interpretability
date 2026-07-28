@@ -13,7 +13,7 @@ the §3.2 denominator is undefined.
 """
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -75,6 +75,8 @@ def build_pair_table(
     *,
     seed: int = 2026,
     match_length: bool = True,
+    prompt_length_fn: Optional[Callable[[int, str], int]] = None,
+    max_donor_tries: int = 40,
 ) -> pd.DataFrame:
     """One (clean, donor) pair per turn. Turns with no valid donor are dropped.
 
@@ -102,7 +104,25 @@ def build_pair_table(
         )
         if not donors:
             continue
-        donor = int(donors[rng.integers(len(donors))])
+
+        if prompt_length_fn is None:
+            donor = int(donors[rng.integers(len(donors))])
+        else:
+            # Standalone hint length is only a pre-filter: a hint tokenises
+            # differently in context, so the ASSEMBLED prompts can still differ
+            # in length. Measured on the real corpus, filtering afterwards left
+            # only ~47% of pairs usable. Selecting a donor whose prompt already
+            # matches restores the yield without inflating the sample size.
+            target_len = prompt_length_fn(row_id, hints[row_id])
+            order = rng.permutation(len(donors))[:max_donor_tries]
+            donor = None
+            for j in order:
+                candidate = int(donors[j])
+                if prompt_length_fn(row_id, hints[candidate]) == target_len:
+                    donor = candidate
+                    break
+            if donor is None:
+                continue
         rows.append(
             {
                 "row_id": row_id,
