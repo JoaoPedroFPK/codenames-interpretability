@@ -50,13 +50,17 @@ def _paths(args) -> Dict[str, str]:
 
 
 def _load_model(model_key: str):
-    """Import and call the per-model loader. GPU stages only."""
-    from .. import models as model_registry
+    """Import and call the per-model loader. GPU stages only.
 
-    loader = getattr(model_registry, f"load_{model_key}", None)
-    if loader is None:
-        raise ValueError(f"no loader registered for {model_key!r}")
-    return loader()
+    Delegates to the CLI's MODEL_REGISTRY rather than guessing an attribute
+    name: the loaders are named per model (``load_mistral_instruct``,
+    ``load_qwen_random``, ...), not ``load_<key>``, and they live in
+    per-model modules that are imported lazily so CLI startup does not pull in
+    all seven model libraries.
+    """
+    from ..cli import _resolve_loader
+
+    return _resolve_loader(model_key)()
 
 
 def _sample(dataset: str, sample_size: Optional[int], seed: int) -> pd.DataFrame:

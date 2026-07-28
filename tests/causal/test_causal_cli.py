@@ -93,3 +93,24 @@ def test_help_does_not_import_torch():
         "sys.exit(1 if 'torch' in sys.modules else 0)"
     )
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+
+
+def test_causal_loader_resolves_for_every_supported_model():
+    """Regression: the loaders are named per model, not load_<key>.
+
+    Caught by an end-to-end queue run that failed with
+    "no loader registered for 'mistral'" before reaching any real work.
+    """
+    from codenames.cli import MODEL_REGISTRY
+    for model in ("mistral", "qwen", "qwen_random"):
+        assert model in MODEL_REGISTRY
+        module_path, attr = MODEL_REGISTRY[model]
+        import importlib
+        mod = importlib.import_module(module_path)
+        assert callable(getattr(mod, attr)), f"{module_path}.{attr} is not callable"
+
+
+def test_causal_runner_uses_the_shared_registry():
+    import inspect
+    from codenames.causal import runner
+    assert "_resolve_loader" in inspect.getsource(runner._load_model)
