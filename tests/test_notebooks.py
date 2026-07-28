@@ -36,3 +36,32 @@ def test_causal_notebook_pilot_uses_the_secondary_condition():
     src = _causal_source()
     assert '"with_social" if PILOT else "no_social"' in src
     assert "150 if PILOT else 1500" in src
+
+
+def _runner_source():
+    import json
+    nb = json.load(open("notebooks/00_runner.ipynb"))
+    return nb, "\n".join("".join(c["source"]) for c in nb["cells"]
+                         if c["cell_type"] == "code")
+
+
+def test_runner_notebook_prewarms_weights():
+    """A cold cache makes a job race a 15 GB download inside its own timeout;
+    a session drop mid-download strands it with nothing measured."""
+    _, src = _runner_source()
+    assert "prewarm_models" in src
+    assert "PREWARM" in src
+
+
+def test_prewarm_runs_before_the_poll_loop():
+    """Warming after the loop starts would not help - the loop blocks."""
+    nb, _ = _runner_source()
+    sources = ["".join(c["source"]) for c in nb["cells"]]
+    warm = next(i for i, s in enumerate(sources) if "prewarm_models" in s)
+    loop = next(i for i, s in enumerate(sources) if "job-runner" in s or "job_runner" in s)
+    assert warm < loop, "pre-warm cell must precede the blocking poll loop"
+
+
+def test_runner_notebook_stays_a_thin_shell():
+    _, src = _runner_source()
+    assert "def " not in src.replace("def _", "")
