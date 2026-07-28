@@ -255,6 +255,15 @@ def run_steer_stage(
     states = rng.normal(size=(8, hidden_dim))
     labels = np.array([True] * 4 + [False] * 4)
 
+    # Every arm is rescaled to the SAME norm-relative magnitude (spec §5B):
+    # alpha multiplies the median residual norm at the injection layer. Raw
+    # unembedding rows and difference-of-means vectors have unrelated scales,
+    # so without this the arms are not comparable to each other or across
+    # models - which is what made Qwen look inert.
+    def _rescale(vec: np.ndarray, scale: float) -> np.ndarray:
+        norm = float(np.linalg.norm(vec))
+        return vec if norm == 0 else (vec / norm * scale).astype(np.float32)
+
     rows: List[Dict[str, object]] = []
     for pair in ctx.pairs.itertuples():
         prompt = ctx.prompt(pair.row_id, pair.hint)
@@ -264,14 +273,17 @@ def run_steer_stage(
         if not clean_ids or not donor_ids:
             continue
 
+        cache, _, _ = ctx.clean_cache(prompt)
+        scale = (float(cache[layer][0].norm(dim=-1).median())
+                 if layer < len(cache) else 1.0)
         directions = {
-            "primary": direction_from_unembedding(unembed, clean_ids),
-            "random_direction": random_direction(
-                hidden_dim, norm=float(np.linalg.norm(
-                    direction_from_unembedding(unembed, clean_ids))), seed=seed),
-            "shuffled_label": shuffled_label_direction(states, labels, seed=seed),
+            "primary": _rescale(direction_from_unembedding(unembed, clean_ids), scale),
+            "random_direction": random_direction(hidden_dim, norm=scale, seed=seed),
+            "shuffled_label": _rescale(
+                shuffled_label_direction(states, labels, seed=seed), scale),
             # Specificity control: aim at the DONOR's word instead (§3.3.8).
-            "counterfactual_target": direction_from_unembedding(unembed, donor_ids),
+            "counterfactual_target": _rescale(
+                direction_from_unembedding(unembed, donor_ids), scale),
         }
 
         baseline = steer_generate(
@@ -289,6 +301,7 @@ def run_steer_stage(
                 lowered = text.lower()
                 rows.append({
                     "arm": arm, "alpha": float(alpha), "layer": int(layer),
+                    "residual_scale": scale,
                     "row_id": int(pair.row_id), "generated": text,
                     "changed": text != baseline,
                     "hit_clean_target": pair.clean_target.lower() in lowered,

@@ -175,6 +175,10 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P5_n_sites", "what": "sites real-patched for the P5 estimate",
          "observed": results.get("P5_n_sites"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P6_scale",
+         "what": "median residual norm at the injection layer (alpha is relative to this)",
+         "observed": results.get("P6_residual_scale"), "threshold": "recorded",
+         "passed": True, "blocking": False},
         {"check": "P1_raw", "what": "raw agreement, counting near-tie flips too",
          "observed": results.get("P1_raw"), "threshold": "diagnostic only",
          "passed": True, "blocking": False},
@@ -288,6 +292,7 @@ def run_pilot(
     p1_hits, flips, ld_corrupts = [], [], []
     p1_margins, p1_decisive_misses = [], []
     p1_miss_rows = []
+    residual_norms = []
     e_full, e_null, attribution_pairs = [], [], []
     denominators = []
     started, forwards = time.perf_counter(), 0
@@ -372,6 +377,10 @@ def run_pilot(
             clean_out = model(**clean_inputs, output_hidden_states=True)
         fwd_seconds += time.perf_counter() - _t0
         cache = [h.detach().clone() for h in clean_out.hidden_states]
+        # Median residual norm at the injection layer, for the norm-relative
+        # alpha sweep the spec (§5B) requires.
+        residual_norms.append(
+            float(cache[1][0].norm(dim=-1).median()) if len(cache) > 1 else 1.0)
         forwards += 1
 
         ld_clean = logit_difference(
@@ -455,9 +464,14 @@ def run_pilot(
     )
     unsteered = steer_generate(
         direction=np.zeros(hidden_dim, dtype=np.float32), alpha=0.0, **base_kwargs)
+    # Alpha is NORM-RELATIVE (spec §5B): scaled by the median residual norm at
+    # the injection layer. A unit-norm direction makes alpha=4 a negligible
+    # perturbation of a 7B residual stream and is not comparable across models -
+    # it made Qwen look inert when the sweep was simply too small for its scale.
+    residual_scale = float(np.median(residual_norms)) if residual_norms else 1.0
     changed = []
     for alpha in alphas:
-        direction = random_direction(hidden_dim, norm=1.0, seed=seed)
+        direction = random_direction(hidden_dim, norm=residual_scale, seed=seed)
         changed.append(
             steer_generate(direction=direction, alpha=float(alpha), **base_kwargs) != unsteered
         )
@@ -520,6 +534,7 @@ def run_pilot(
         "P5_n_sites": len(attribution_pairs),
         "P6_change": float(np.mean(changed)) if changed else 0.0,
         "P6_parse": 1.0,
+        "P6_residual_scale": float(np.median(residual_norms)) if residual_norms else 0.0,
         "P7_finite": bool(np.isfinite(np.array(e_full, dtype=float)).all()),
         "P8_fwd_per_s": forwards / max(fwd_seconds, 1e-9),
         "P8_wall_fwd_per_s": forwards / elapsed,

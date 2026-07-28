@@ -479,3 +479,14 @@ def test_p1_still_fails_a_real_indexing_fault_at_the_new_threshold():
          "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
          "P7_finite": True}
     assert "P1" in pilot_verdict(r)["blocking_failures"]
+
+
+def test_p6_alpha_is_norm_relative():
+    """A unit-norm direction makes alpha=4 negligible against a 7B residual
+    stream, and is not comparable across models."""
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert "residual_scale" in src
+    assert "norm=residual_scale" in src
+    assert "norm=1.0" not in src, "unit-norm steering direction still present"

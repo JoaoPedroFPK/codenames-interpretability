@@ -142,3 +142,16 @@ def test_resume_skips_work_already_done(tiny, tmp_path):
     # the first pair was already checkpointed, so fewer pairs are re-measured
     assert len(seen) < len(run_patch_stage(**_common(tiny), loci=loci,
                                            window_widths=(1,))["row_id"].unique()) + 1
+
+
+def test_every_steering_arm_shares_the_same_norm_relative_scale(tiny):
+    """Spec §5B: alpha multiplies the median residual norm at the injection
+    layer. Raw unembedding rows and difference-of-means vectors have unrelated
+    scales, so without rescaling the arms are not comparable to each other or
+    across models - which is what made Qwen appear inert."""
+    out = run_steer_stage(**_common(tiny), layer=1, alphas=(1.0,), max_new_tokens=3)
+    assert "residual_scale" in out.columns
+    assert (out["residual_scale"] > 0).all()
+    # one scale per turn, shared by every arm at that turn
+    per_turn = out.groupby("row_id")["residual_scale"].nunique()
+    assert (per_turn == 1).all()
