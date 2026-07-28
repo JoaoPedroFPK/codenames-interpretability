@@ -27,6 +27,8 @@ from .metrics import logit_difference, normalized_effect
 Site = Tuple[int, int]
 
 _LAYER_LIST_PATHS = ("model.layers", "transformer.h", "gpt_neox.layers", "model.decoder.layers")
+_FINAL_NORM_PATHS = ("model.norm", "transformer.ln_f", "gpt_neox.final_layer_norm",
+                     "model.decoder.final_layer_norm")
 
 
 def layer_window(center: int, width: int, n_layers: int) -> List[int]:
@@ -38,6 +40,27 @@ def layer_window(center: int, width: int, n_layers: int) -> List[int]:
 def all_sites(*, n_layers: int, n_positions: int) -> List[Site]:
     """Every (layer, position) cell of the grid, row-major."""
     return [(layer, pos) for layer in range(n_layers) for pos in range(n_positions)]
+
+
+def _final_norm(model):
+    """The norm applied after the last block.
+
+    ``output_hidden_states`` returns the POST-norm state as its last entry, so
+    patching that index must target this module -- not the last block's output,
+    which is pre-norm. Writing a post-norm value into the pre-norm slot makes
+    the model apply the norm twice. The error is invisible when the norm is
+    near-idempotent (gamma about 1) and was masked on both the tiny test model
+    and Mistral; it cost ~14% of the full-stack identity on Qwen.
+    """
+    for path in _FINAL_NORM_PATHS:
+        obj = model
+        try:
+            for part in path.split("."):
+                obj = getattr(obj, part)
+            return obj
+        except AttributeError:
+            continue
+    return None
 
 
 def _decoder_layers(model):
@@ -65,14 +88,22 @@ def patch_hook(positions: Sequence[int], values: torch.Tensor) -> Callable:
 
 
 def _register(model, layers, sites: Sequence[Site], clean_cache) -> List:
+    """Hook the module that produces each cached index."""
     by_layer: Dict[int, List[int]] = {}
     for layer, position in sites:
         by_layer.setdefault(layer, []).append(position)
 
     handles = []
+    top = len(clean_cache) - 1          # index of the post-final-norm state
+    final_norm = _final_norm(model)
     for layer, positions in by_layer.items():
         values = torch.stack([clean_cache[layer][0, p] for p in positions])
-        module = model.get_input_embeddings() if layer == 0 else layers[layer - 1]
+        if layer == 0:
+            module = model.get_input_embeddings()
+        elif layer == top and final_norm is not None:
+            module = final_norm
+        else:
+            module = layers[layer - 1]
         handles.append(module.register_forward_hook(patch_hook(positions, values)))
     return handles
 

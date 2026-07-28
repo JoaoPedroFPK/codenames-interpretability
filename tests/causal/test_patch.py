@@ -100,3 +100,50 @@ def test_patching_is_deterministic(setup):
     _, _, cache, _, n_pos = setup
     sites = [(len(cache) - 1, n_pos - 1)]
     assert _patch(setup, sites) == _patch(setup, sites)
+
+
+def test_final_norm_module_is_located(tiny):
+    from codenames.causal.patch import _final_norm
+    model, _ = tiny
+    assert _final_norm(model) is not None
+
+
+def test_full_stack_identity_holds_when_the_final_norm_is_NOT_idempotent(tiny):
+    """The bug this guards: hidden_states[-1] is POST-final-norm, but the last
+    decoder block's output is pre-norm. Patching the top index into the block
+    output makes the model apply the norm twice.
+
+    A default tiny model has gamma about 1, so norm(norm(x)) == norm(x) and the
+    error is invisible -- which is exactly why it survived to a real run and
+    cost ~14% of the identity on Qwen. Here gamma is perturbed so double-norming
+    genuinely changes the result.
+    """
+    import torch
+    from codenames.causal.patch import _final_norm
+
+    model, tok = tiny
+    norm = _final_norm(model)
+    original = norm.weight.detach().clone()
+    try:
+        with torch.no_grad():
+            norm.weight.copy_(original * 2.5 + 0.7)   # decisively non-idempotent
+
+        ids = tok(CLEAN_PROMPT, return_tensors="pt")
+        with torch.no_grad():
+            out = model(**ids, output_hidden_states=True)
+        cache = [h.detach().clone() for h in out.hidden_states]
+        table = build_token_table(tok, ["sea", "ship"])
+        n_pos = ids["input_ids"].shape[1]
+
+        e = run_patch(
+            model=model, tokenizer=tok, clean_cache=cache,
+            clean_prompt=CLEAN_PROMPT, corrupt_prompt=CORRUPT_PROMPT,
+            sites=all_sites(n_layers=len(cache), n_positions=n_pos),
+            readout_table=table, clean_target="sea", donor_target="ship",
+            p_star=-1, device="cpu",
+        )
+        assert e == pytest.approx(1.0, abs=0.02), (
+            f"full-stack identity broke under a non-idempotent final norm: e={e}")
+    finally:
+        with torch.no_grad():
+            norm.weight.copy_(original)
