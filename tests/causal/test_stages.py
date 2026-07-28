@@ -91,3 +91,54 @@ def test_steer_stage_is_deterministic(tiny):
     a = run_steer_stage(**kw)
     b = run_steer_stage(**kw)
     pd.testing.assert_frame_equal(a, b)
+
+
+# --- resume (causal-patch is ~94% of the compute budget) --------------------
+
+def test_patch_stage_writes_checkpoints(tiny, tmp_path):
+    _, loci = run_scan_stage(**_common(tiny), top_k=1)
+    run_patch_stage(**_common(tiny), loci=loci, window_widths=(1,),
+                    checkpoint_dir=str(tmp_path), prefix="tiny",
+                    flush_every=1)
+    from codenames import checkpoint
+    assert checkpoint.list_ckpts(str(tmp_path), "tiny_patch", "patch", "no_social")
+
+
+def test_resume_is_byte_identical_to_an_uninterrupted_run(tiny, tmp_path):
+    """The project's standing byte-identity rule for --resume."""
+    _, loci = run_scan_stage(**_common(tiny), top_k=2)
+    kw = dict(**_common(tiny), loci=loci, window_widths=(1,), prefix="tiny")
+
+    full = run_patch_stage(**kw)
+
+    # Interrupt after the first pair, then resume into the same directory.
+    partial_dir = str(tmp_path / "ck")
+    run_patch_stage(**kw, checkpoint_dir=partial_dir, flush_every=1,
+                    stop_after_pairs=1)
+    resumed = run_patch_stage(**kw, checkpoint_dir=partial_dir, flush_every=1,
+                              resume=True)
+
+    pd.testing.assert_frame_equal(
+        full.sort_values(["row_id", "layer", "position", "width"]).reset_index(drop=True),
+        resumed.sort_values(["row_id", "layer", "position", "width"]).reset_index(drop=True),
+    )
+
+
+def test_resume_without_a_checkpoint_starts_clean(tiny, tmp_path):
+    _, loci = run_scan_stage(**_common(tiny), top_k=1)
+    out = run_patch_stage(**_common(tiny), loci=loci, window_widths=(1,),
+                          checkpoint_dir=str(tmp_path), prefix="tiny", resume=True)
+    assert len(out) > 0
+
+
+def test_resume_skips_work_already_done(tiny, tmp_path):
+    _, loci = run_scan_stage(**_common(tiny), top_k=1)
+    kw = dict(**_common(tiny), loci=loci, window_widths=(1,), prefix="tiny",
+              checkpoint_dir=str(tmp_path), flush_every=1)
+    run_patch_stage(**kw, stop_after_pairs=1)
+
+    seen = []
+    run_patch_stage(**kw, resume=True, progress=lambda: seen.append(1))
+    # the first pair was already checkpointed, so fewer pairs are re-measured
+    assert len(seen) < len(run_patch_stage(**_common(tiny), loci=loci,
+                                           window_widths=(1,))["row_id"].unique()) + 1

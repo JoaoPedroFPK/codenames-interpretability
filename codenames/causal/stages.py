@@ -9,6 +9,7 @@ Stage 1 (scan) is a SCREEN and carries no inferential claim (§3.4). Stage 2
 that must be resumable.
 """
 
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -134,19 +135,63 @@ def run_patch_stage(
     *, model, tokenizer, df_sample, chat_template_strategy, mode, seed,
     loci: pd.DataFrame, window_widths: Sequence[int] = (1, 3, 5),
     device: Optional[str] = None, progress=None,
+    checkpoint_dir: Optional[str] = None, prefix: str = "causal",
+    resume: bool = False, flush_every: int = 25,
+    stop_after_pairs: Optional[int] = None,
 ) -> pd.DataFrame:
     """Real patches on the candidate loci; one row per (locus, width, turn).
 
-    This is the evidence stage and ~94% of the compute budget. Effects that
-    cannot be computed are recorded as NaN rather than dropped, so downstream
-    counts stay honest.
+    This is the evidence stage and ~94% of the compute budget, so it is
+    resumable through the same manifest machinery as the main extraction loop.
+    Pairs are processed in a fixed order and each pair's rows depend only on
+    that pair, so resuming and appending is byte-identical to an uninterrupted
+    run -- the project's standing rule for ``--resume``.
+
+    Effects that cannot be computed are recorded as NaN rather than dropped, so
+    downstream counts stay honest.
+
+    ``stop_after_pairs`` exists to exercise the interrupt path in tests.
     """
+    from .. import checkpoint
     ctx = _Context(model=model, tokenizer=tokenizer, df_sample=df_sample,
                    chat_template_strategy=chat_template_strategy, mode=mode,
                    seed=seed, device=device)
 
+    ckpt_prefix = f"{prefix}_patch"
     rows: List[Dict[str, object]] = []
-    for pair in ctx.pairs.itertuples():
+    pairs_done = 0
+
+    if checkpoint_dir is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        if resume:
+            manifest = checkpoint.read_manifest(checkpoint_dir, ckpt_prefix, mode)
+            if manifest is not None:
+                pairs_done = int(manifest.get("boards_done", 0))
+                rows = list(checkpoint.load_records(
+                    checkpoint_dir, ckpt_prefix, "patch", mode))
+                print(f"  [resume] patch: continuing at pair "
+                      f"{pairs_done}/{len(ctx.pairs)} ({len(rows)} rows cached)")
+        else:
+            checkpoint.remove_manifest(checkpoint_dir, ckpt_prefix, mode)
+            checkpoint.remove_ckpts(checkpoint_dir, ckpt_prefix, mode,
+                                    streams=("patch",))
+
+    def _commit(done: int, shard: List[Dict[str, object]], idx: int) -> None:
+        if checkpoint_dir is None:
+            return
+        checkpoint.write_records(shard, checkpoint_dir, ckpt_prefix,
+                                 "patch", mode, idx)
+        checkpoint.write_manifest(
+            checkpoint_dir, ckpt_prefix, mode, n_boards=len(ctx.pairs),
+            boards_done=done, ckpt_committed=idx,
+            complete=(done == len(ctx.pairs)))
+
+    shard: List[Dict[str, object]] = []
+    for pair_idx, pair in enumerate(ctx.pairs.itertuples()):
+        if pair_idx < pairs_done:
+            continue
+        if stop_after_pairs is not None and pair_idx >= pairs_done + stop_after_pairs:
+            break
         clean_prompt = ctx.prompt(pair.row_id, pair.hint)
         corrupt_prompt = ctx.prompt(pair.row_id, pair.donor_hint)
         cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt)
@@ -170,13 +215,22 @@ def run_patch_stage(
             for width in window_widths:
                 band = layer_window(int(locus.layer), int(width), len(cache))
                 sites = [(l, int(locus.position)) for l in band]
-                rows.append({
+                shard.append({
                     "layer": int(locus.layer), "position": int(locus.position),
                     "width": int(width), "row_id": int(pair.row_id),
                     "effect": run_patch(sites=sites, **shared),
                 })
         if progress is not None:
             progress()
+
+        if checkpoint_dir is not None and (pair_idx + 1) % flush_every == 0:
+            rows.extend(shard)
+            _commit(pair_idx + 1, shard, pair_idx + 1)
+            shard = []
+
+    rows.extend(shard)
+    if checkpoint_dir is not None and shard:
+        _commit(min(pair_idx + 1, len(ctx.pairs)), shard, pair_idx + 1)
 
     return pd.DataFrame(rows)
 

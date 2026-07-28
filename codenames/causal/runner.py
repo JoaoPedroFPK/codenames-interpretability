@@ -152,6 +152,8 @@ def cmd_patch(args) -> int:
         model=model, tokenizer=tokenizer, df_sample=df,
         chat_template_strategy=meta["chat_template_strategy"],
         mode=args.condition, seed=args.seed, loci=loci, window_widths=widths,
+        checkpoint_dir=os.path.join(paths["base"], "checkpoints"),
+        prefix=paths["prefix"], resume=bool(getattr(args, "resume", False)),
     )
     effects.to_parquet(paths["effects"], index=False)
     finite = int(effects["effect"].notna().sum())

@@ -113,3 +113,18 @@ def test_causal_runner_uses_the_shared_registry():
     import inspect
     from codenames.causal import runner
     assert "_resolve_loader" in inspect.getsource(runner._load_model)
+
+
+def test_patch_passes_resume_through_to_the_stage():
+    """causal-patch is ~94% of the budget; a dropped session must not lose it."""
+    import inspect
+    from codenames.causal import runner
+    src = inspect.getsource(runner.cmd_patch)
+    assert "checkpoint_dir" in src and "resume=" in src
+
+
+def test_patch_exposes_a_resume_flag():
+    args = build_parser().parse_args(["causal-patch", "--model", "mistral",
+                                      "--output-dir", "/tmp/x",
+                                      "--dataset", "/tmp/d.csv", "--resume"])
+    assert args.resume is True
