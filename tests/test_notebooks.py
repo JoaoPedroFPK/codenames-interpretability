@@ -65,3 +65,17 @@ def test_prewarm_runs_before_the_poll_loop():
 def test_runner_notebook_stays_a_thin_shell():
     _, src = _runner_source()
     assert "def " not in src.replace("def _", "")
+
+
+def test_prewarm_cell_puts_the_package_on_sys_path():
+    """Cell 2's editable install does not reach the already-running kernel, so
+    a bare `import codenames` raises ModuleNotFoundError. Notebooks 01-08 all
+    insert REPO_DIR into sys.path for this reason; the runner notebook needed
+    it too once a Python-import cell was added.
+    """
+    nb, _ = _runner_source()
+    cell = next("".join(c["source"]) for c in nb["cells"]
+                if "prewarm_models" in "".join(c["source"]))
+    assert "sys.path.insert" in cell
+    assert cell.index("sys.path.insert") < cell.index("from codenames"), \
+        "sys.path must be set BEFORE the package import"
