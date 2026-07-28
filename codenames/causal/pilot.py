@@ -30,7 +30,11 @@ PILOT_THRESHOLDS = {
     "P1": 0.99,                        # p* reproduces the recorded generated token
     "P2_lo": 0.98, "P2_hi": 1.02,      # full-stack patch identity: e == 1
     "P3": 0.02,                        # null patch identity: |e| == 0
-    "P4_flip": 0.60, "P4_sign": 0.80,  # corruption actually corrupts
+    # P4 amended 2026-07-28 (causal_spec.md §12.5): the flip criterion is
+    # CEILING-RELATIVE. An absolute rate implicitly assumed the model answers
+    # the donor hint correctly, but its own accuracy is ~0.60, so a 0.60 gate
+    # sat at the ceiling and was near-unpassable. Both criteria must hold.
+    "P4_flip_ratio": 0.85, "P4_sign": 0.80,
     "P5_rho": 0.5, "P5_fnr": 0.20,     # attribution tracks real patches
     "P6_change": 0.10, "P6_parse": 0.90,  # steering is not inert
 }
@@ -49,8 +53,13 @@ def pilot_verdict(results: Dict[str, float]) -> Dict[str, object]:
         failed.append("P2")
     if abs(float(results.get("P3", 1.0))) > t["P3"]:
         failed.append("P3")
-    if (float(results.get("P4_flip", 0.0)) < t["P4_flip"]
-            or float(results.get("P4_sign", 0.0)) < t["P4_sign"]):
+    clean_acc = float(results.get("P4_clean_accuracy", 0.0))
+    flip = float(results.get("P4_flip", 0.0))
+    # Ceiling-relative: compare the flip rate against what the model can do.
+    # A zero/absent clean accuracy means the denominator is unmeasured, which
+    # counts as a failure rather than a free pass.
+    flip_ok = clean_acc > 0 and (flip / clean_acc) >= t["P4_flip_ratio"]
+    if not flip_ok or float(results.get("P4_sign", 0.0)) < t["P4_sign"]:
         failed.append("P4")
     if not bool(results.get("P7_finite", False)):
         failed.append("P7")
@@ -91,7 +100,8 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
          "passed": "P3" not in failed, "blocking": True},
         {"check": "P4", "what": "corruption flips the answer",
          "observed": results.get("P4_flip"),
-         "threshold": f">= {t['P4_flip']} flip, >= {t['P4_sign']} sign",
+         "threshold": (f">= {t['P4_flip_ratio']} x clean acc, "
+                       f">= {t['P4_sign']} sign"),
          "passed": "P4" not in failed, "blocking": True},
         {"check": "P5", "what": "attribution tracks real patches",
          "observed": results.get("P5_rho"),

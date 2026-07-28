@@ -7,7 +7,7 @@ from codenames.causal.pilot import PILOT_THRESHOLDS, pilot_report, pilot_verdict
 
 def _results(**overrides):
     base = {
-        "P1": 1.00, "P2": 1.00, "P3": 0.00, "P4_flip": 0.75, "P4_sign": 0.90,
+        "P1": 1.00, "P2": 1.00, "P3": 0.00, "P4_flip": 0.55, "P4_sign": 0.90, "P4_clean_accuracy": 0.60,
         "P5_rho": 0.70, "P5_fnr": 0.10, "P6_change": 0.30, "P6_parse": 0.95,
         "P7_finite": True, "P8_fwd_per_s": 54.0,
     }
@@ -44,7 +44,7 @@ def test_p5_fnr_failure_also_costs_the_shortcut():
         ({"P1": 0.5}, "P1"),
         ({"P2": 0.5}, "P2"),
         ({"P3": 0.9}, "P3"),
-        ({"P4_flip": 0.1}, "P4"),
+        ({"P4_flip": 0.05}, "P4"),
         ({"P7_finite": False}, "P7"),
     ],
 )
@@ -64,7 +64,7 @@ def test_thresholds_match_the_spec():
     assert PILOT_THRESHOLDS["P2_lo"] == 0.98
     assert PILOT_THRESHOLDS["P2_hi"] == 1.02
     assert PILOT_THRESHOLDS["P3"] == 0.02
-    assert PILOT_THRESHOLDS["P4_flip"] == 0.60
+    assert PILOT_THRESHOLDS["P4_flip_ratio"] == 0.85
     assert PILOT_THRESHOLDS["P5_rho"] == 0.5
     assert PILOT_THRESHOLDS["P5_fnr"] == 0.20
 
@@ -233,11 +233,44 @@ def test_p4_normalised_is_diagnostic_not_a_gate():
     """The flip rate needs the model's own accuracy as a denominator, but that
     must not silently become a pass condition."""
     from codenames.causal.pilot import pilot_report, pilot_verdict
-    r = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.567, "P4_sign": 0.9,
+    r = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.30, "P4_sign": 0.9,
          "P5_rho": 0.7, "P5_fnr": 0.1, "P6_change": 0.3, "P6_parse": 0.95,
          "P7_finite": True, "P4_clean_accuracy": 0.617}
     report = pilot_report(r).set_index("check")
-    assert report.loc["P4_normalised", "observed"] == pytest.approx(0.567 / 0.617, abs=1e-6)
+    assert report.loc["P4_normalised", "observed"] == pytest.approx(0.30 / 0.617, abs=1e-6)
     assert "NOT a gate" in report.loc["P4_normalised", "threshold"]
     # the real gate still fails on the raw flip rate
     assert "P4" in pilot_verdict(r)["blocking_failures"]
+
+
+def test_p4_is_ceiling_relative_after_the_2026_07_28_amendment():
+    """The observed run: flip 0.577 against a model accuracy of 0.600 passes,
+    because 0.577/0.600 = 0.96 >= 0.85. The old absolute 0.60 gate sat at the
+    model's own ceiling and was near-unpassable."""
+    ok = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.90,
+          "P4_clean_accuracy": 0.600, "P5_rho": 0.7, "P5_fnr": 0.1,
+          "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    assert pilot_verdict(ok)["launch_full_run"] is True
+
+
+def test_p4_still_fails_when_corruption_genuinely_does_not_work():
+    weak = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.20, "P4_sign": 0.90,
+            "P4_clean_accuracy": 0.600, "P5_rho": 0.7, "P5_fnr": 0.1,
+            "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    assert "P4" in pilot_verdict(weak)["blocking_failures"]
+
+
+def test_p4_fails_when_the_denominator_is_unmeasured():
+    """An absent clean accuracy must not become a free pass."""
+    missing = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.9, "P4_sign": 0.9,
+               "P5_rho": 0.7, "P5_fnr": 0.1, "P6_change": 0.3, "P6_parse": 0.95,
+               "P7_finite": True}
+    assert "P4" in pilot_verdict(missing)["blocking_failures"]
+
+
+def test_p4_sign_still_blocks_independently():
+    """Both criteria must hold - a good flip ratio cannot rescue a bad sign."""
+    bad_sign = {"P1": 1.0, "P2": 1.0, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.4,
+                "P4_clean_accuracy": 0.600, "P5_rho": 0.7, "P5_fnr": 0.1,
+                "P6_change": 0.3, "P6_parse": 0.95, "P7_finite": True}
+    assert "P4" in pilot_verdict(bad_sign)["blocking_failures"]
