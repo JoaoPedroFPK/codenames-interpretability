@@ -283,6 +283,7 @@ def run_pilot(
 
     p1_hits, flips, ld_corrupts = [], [], []
     p1_margins, p1_decisive_misses = [], []
+    p1_miss_rows = []
     e_full, e_null, attribution_pairs = [], [], []
     denominators = []
     started, forwards = time.perf_counter(), 0
@@ -346,6 +347,19 @@ def run_pilot(
                         # indexing fault rather than a near-tie flip.
                         if margin >= PILOT_THRESHOLDS["P1_decisive_margin"]:
                             p1_decisive_misses.append(margin)
+                            # Capture the case so a decisive miss can be
+                            # diagnosed instead of guessed at.
+                            p1_miss_rows.append({
+                                "row_id": int(pair.row_id),
+                                "margin": margin,
+                                "p_star": int(position),
+                                "n_prompt_tokens": len(tokenizer.encode(
+                                    clean_prompt, add_special_tokens=False)),
+                                "predicted": tokenizer.decode([predicted]),
+                                "actual": tokenizer.decode([actual]),
+                                "word": str(word),
+                                "generation_head": str(text)[:80],
+                            })
                     forwards += 1
 
         clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
@@ -518,6 +532,12 @@ def run_pilot(
             "mismatch; the standalone-hint length filter is not sufficient for "
             "this tokenizer and pairs.build_pair_table needs a prompt-level check"
         )
+    if p1_miss_rows:
+        miss_path = os.path.join(
+            base_dir, f"{prefix}_causal_pilot_{mode}_p1_misses.csv")
+        pd.DataFrame(p1_miss_rows).to_csv(miss_path, index=False)
+        print(f"  {len(p1_miss_rows)} decisive P1 misses written to {miss_path}")
+
     report = pilot_report(results)
     report.to_csv(os.path.join(base_dir, f"{prefix}_causal_pilot_{mode}.csv"), index=False)
     return report, results
