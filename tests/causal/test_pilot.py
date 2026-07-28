@@ -401,3 +401,26 @@ def test_report_surfaces_the_p2_outlier_diagnostics():
     assert report.loc["P2_denom", "observed"] == 12.4
     # the robust statistic is what gates
     assert pilot_verdict(r)["launch_full_run"] is True
+
+
+def test_p1_records_miss_margins_for_diagnosis():
+    """Qwen P1=0.939 vs Mistral 1.000. A near-tie margin means numerical drift
+    between the accelerated generation path and the reference path; a wide
+    margin means something structural. The lens calibration gate was diagnosed
+    exactly this way (median 4.2-logit margins => structural)."""
+    import inspect
+    from codenames.causal.pilot import run_pilot
+    src = inspect.getsource(run_pilot)
+    assert "p1_margins" in src
+    assert '"P1_miss_margin_median"' in src
+
+
+def test_report_surfaces_p1_margin_diagnostics():
+    r = {"P1": 0.939, "P1_miss_margin_median": 0.03, "P1_n_misses": 8,
+         "P2": 1.0, "P3": 0.0, "P4_flip": 0.577, "P4_sign": 0.9,
+         "P4_clean_accuracy": 0.6, "P5_rho": 0.7, "P5_fnr": 0.1,
+         "P5_n_high_effect": 12, "P6_change": 0.3, "P6_parse": 0.95,
+         "P7_finite": True}
+    report = pilot_report(r).set_index("check")
+    assert report.loc["P1_margin", "observed"] == 0.03
+    assert report.loc["P1_misses", "observed"] == 8

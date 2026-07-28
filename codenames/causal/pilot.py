@@ -166,6 +166,13 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P5_n_sites", "what": "sites real-patched for the P5 estimate",
          "observed": results.get("P5_n_sites"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P1_margin",
+         "what": "median logit margin on P1 misses (small = numerical drift)",
+         "observed": results.get("P1_miss_margin_median"),
+         "threshold": "diagnostic only", "passed": True, "blocking": False},
+        {"check": "P1_misses", "what": "turns where p* did not reproduce",
+         "observed": results.get("P1_n_misses"), "threshold": "recorded",
+         "passed": True, "blocking": False},
         {"check": "P2_within_tol", "what": "pairs whose full-stack patch is within tolerance",
          "observed": results.get("P2_within_tol"), "threshold": "recorded",
          "passed": True, "blocking": False},
@@ -264,6 +271,7 @@ def run_pilot(
         raise ValueError("no valid counterfactual pairs in the pilot sample")
 
     p1_hits, flips, ld_corrupts = [], [], []
+    p1_margins = []
     e_full, e_null, attribution_pairs = [], [], []
     denominators = []
     started, forwards = time.perf_counter(), 0
@@ -311,8 +319,18 @@ def run_pilot(
                     ids = joint["input_ids"][0]
                     with torch.no_grad():
                         joint_logits = model(**joint).logits[0]
-                    predicted = int(joint_logits[position - 1].argmax())
-                    p1_hits.append(predicted == int(ids[position]))
+                    row_logits = joint_logits[position - 1]
+                    predicted = int(row_logits.argmax())
+                    actual = int(ids[position])
+                    hit = predicted == actual
+                    p1_hits.append(hit)
+                    if not hit:
+                        # Margin between what the model predicts and what the
+                        # recording holds. A near-tie means numerical drift
+                        # (the generations were produced on an accelerated
+                        # path); a wide margin means something structural.
+                        p1_margins.append(
+                            float(row_logits[predicted] - row_logits[actual]))
                     forwards += 1
 
         clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
@@ -442,6 +460,11 @@ def run_pilot(
     results: Dict[str, float] = {
         "P1": float(np.mean(p1_hits)) if p1_hits else 0.0,
         "P1_applicable": generation_csv is not None,
+        "P1_miss_margin_median": (float(np.median(p1_margins))
+                                  if p1_margins else 0.0),
+        "P1_miss_margin_max": (float(np.max(p1_margins))
+                               if p1_margins else 0.0),
+        "P1_n_misses": int(len(p1_margins)),
         # MEDIAN, not mean: the identity is per-pair, and a pair whose
         # clean/corrupt denominator is near zero makes e explode and drags
         # an average. Qwen returned mean 0.886 against a median that holds.
