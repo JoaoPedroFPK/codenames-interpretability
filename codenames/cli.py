@@ -16,6 +16,12 @@ Subcommands:
 - ``lens-tune``:    tuned-lens translator training (GPU)
 - ``lens-apply``:   raw/tuned candidate scoring from the dump (offline)
 - ``lens-analyze``: pre-registered trajectory analysis + overlay figures
+- ``job-submit``: enqueue a GPU job for the Colab runner
+- ``job-status``: runner health plus recent job states
+- ``job-logs``:   print a job's captured output
+- ``job-cancel``: request cancellation of a running job
+- ``job-sync``:   download run artifacts from Drive into output/
+- ``job-runner``: the agent poll loop itself (runs inside Colab)
 
 Output of each subcommand is identical to running the corresponding cells of
 the model notebook in order; no extra logging, no progress suppression. All
@@ -1256,6 +1262,272 @@ def _cmd_lens_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Remote job subcommands
+# (docs/superpowers/specs/2026-07-27-colab-remote-execution-design.md)
+# ---------------------------------------------------------------------------
+
+def _add_store_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--jobs-dir",
+        default=None,
+        help=(
+            "Path to a local jobs tree. Given, the command talks to the "
+            "filesystem instead of Drive — used by the Colab runner (which "
+            "sees Drive as a mount) and by tests."
+        ),
+    )
+    p.add_argument("--drive-root", default="Codenames-Research",
+                   help="Drive folder holding the run outputs and the _jobs tree.")
+    p.add_argument("--token", default="token.json",
+                   help="OAuth token cache path.")
+    p.add_argument("--client-secret", default="client_secret.json",
+                   help="OAuth installed-app client secret path.")
+
+
+def _open_remote_store(args):
+    """Return a job store: filesystem when --jobs-dir is given, else Drive."""
+    from codenames.remote.store import LocalDirStore
+
+    if args.jobs_dir:
+        store = LocalDirStore(args.jobs_dir)
+        store.ensure_layout()
+        return store
+
+    from pathlib import Path
+
+    from codenames.remote.drive import (
+        DriveApiStore,
+        build_drive_service,
+        load_credentials,
+        resolve_folder,
+    )
+
+    creds = load_credentials(Path(args.token), Path(args.client_secret))
+    service = build_drive_service(creds)
+    root = resolve_folder(service, [args.drive_root, "_jobs"], create=True)
+    store = DriveApiStore(service, root)
+    store.ensure_layout()
+    return store
+
+
+def _make_job_submit_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "job-submit",
+        help="Enqueue a GPU job for the Colab runner.",
+        description=(
+            "Write a job document into the queue. The subcommand after -- is "
+            "run verbatim by the runner and must be on its whitelist."
+        ),
+    )
+    _add_store_args(p)
+    p.add_argument("--git-ref", default="probing",
+                   help="Git ref the runner checks out before running the job.")
+    p.add_argument("--timeout", type=int, default=6 * 3600,
+                   help="Job timeout in seconds.")
+    p.add_argument("--expect-gpu", default=None,
+                   help="Refuse the job unless the session GPU name contains this.")
+    p.add_argument("job_argv", nargs=argparse.REMAINDER,
+                   help="After --, the codenames-experiment subcommand and its flags.")
+    return p
+
+
+def _cmd_job_submit(args) -> int:
+    from codenames.remote import client
+
+    argv = [a for a in args.job_argv if a != "--"]
+    store = _open_remote_store(args)
+    try:
+        job = client.submit(store, argv, git_ref=args.git_ref,
+                            timeout_s=args.timeout, expect_gpu=args.expect_gpu)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"Queued {job.job_id}")
+    print(f"  argv:    {' '.join(job.argv)}")
+    print(f"  git ref: {job.git_ref}")
+    return 0
+
+
+def _make_job_status_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser("job-status", help="Runner health plus recent job states.")
+    _add_store_args(p)
+    p.add_argument("--job", default=None, help="Show only this job.")
+    p.add_argument("--limit", type=int, default=10,
+                   help="How many recent jobs to list.")
+    p.add_argument("--watch", action="store_true",
+                   help=("Poll until nothing is queued or running, holding macOS "
+                         "awake meanwhile so the Colab tab is not reaped."))
+    p.add_argument("--interval", type=float, default=30.0,
+                   help="Seconds between polls when --watch is set.")
+    return p
+
+
+def _print_job_status(store, args) -> int:
+    from codenames.remote import client
+
+    health = client.runner_health(store)
+    if health.heartbeat is None:
+        print("Runner: no runner has ever reported in this tree.")
+    elif health.alive:
+        hb = health.heartbeat
+        print(f"Runner: ALIVE ({hb.runner_id}, {health.age_s:.0f}s ago) "
+              f"gpu={hb.gpu_name} job={hb.current_job or '-'}")
+    else:
+        print(f"Runner: STALE — last heartbeat {health.age_s:.0f}s ago. "
+              f"The Colab session is probably dead; re-run the runner cell.")
+
+    if args.job:
+        status = store.read_status(args.job)
+        if status is None:
+            print(f"No status for {args.job}", file=sys.stderr)
+            return 1
+        print(client.format_status_line(status))
+        return 0
+
+    for status in store.list_statuses(limit=args.limit):
+        print(client.format_status_line(status))
+    return 0
+
+
+def _cmd_job_status(args) -> int:
+    import time
+
+    from codenames.remote import client
+
+    store = _open_remote_store(args)
+    if not args.watch:
+        return _print_job_status(store, args)
+
+    with client.KeepAwake():
+        while True:
+            rc = _print_job_status(store, args)
+            if not client.has_unfinished_work(store):
+                return rc
+            time.sleep(args.interval)
+            print("-" * 70)
+
+
+def _make_job_logs_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser("job-logs", help="Print a job's captured output.")
+    _add_store_args(p)
+    p.add_argument("--job", required=True)
+    p.add_argument("--tail", type=int, default=None, help="Only the last N lines.")
+    return p
+
+
+def _cmd_job_logs(args) -> int:
+    from codenames.remote import client
+
+    store = _open_remote_store(args)
+    text = client.logs(store, args.job, tail=args.tail)
+    if not text:
+        print(f"No log for {args.job}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
+def _make_job_cancel_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser("job-cancel", help="Request cancellation of a running job.")
+    _add_store_args(p)
+    p.add_argument("--job", required=True)
+    return p
+
+
+def _cmd_job_cancel(args) -> int:
+    from codenames.remote import client
+
+    store = _open_remote_store(args)
+    if not client.cancel(store, args.job):
+        print(f"{args.job} has already finished; nothing to cancel.", file=sys.stderr)
+        return 1
+    print(f"Cancellation requested for {args.job}.")
+    return 0
+
+
+def _make_job_sync_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser("job-sync",
+                      help="Download run artifacts from Drive into output/.")
+    _add_store_args(p)
+    p.add_argument("--models", default=",".join(MODEL_REGISTRY),
+                   help="Comma-separated model prefixes to sync.")
+    p.add_argument("--output-dir", default="output")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--skip-vectors", action="store_true",
+                       help="Skip the multi-GB .npz/.npy artifacts (iteration only).")
+    group.add_argument("--only-vectors", action="store_true",
+                       help="Fetch only the multi-GB .npz/.npy artifacts.")
+    p.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def _cmd_job_sync(args) -> int:
+    from pathlib import Path
+
+    from codenames.remote.drive import (
+        build_drive_service,
+        load_credentials,
+        resolve_folder,
+    )
+    from codenames.remote.sync import sync_model_outputs
+
+    creds = load_credentials(Path(args.token), Path(args.client_secret))
+    service = build_drive_service(creds)
+    root = resolve_folder(service, [args.drive_root])
+    if root is None:
+        print(f"Drive folder '{args.drive_root}' not found.", file=sys.stderr)
+        return 1
+    report = sync_model_outputs(
+        service, root, Path(args.output_dir), args.models.split(","),
+        skip_heavy=args.skip_vectors, only_heavy=args.only_vectors,
+        dry_run=args.dry_run,
+    )
+    verb = "Would download" if args.dry_run else "Downloaded"
+    print(f"{verb} {len(report.downloaded)} file(s), "
+          f"{report.bytes_downloaded / 1e9:.2f} GB; skipped {len(report.skipped)}.")
+    for name in report.downloaded:
+        print(f"  {name}")
+    return 0
+
+
+def _make_job_runner_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "job-runner",
+        help="Run the agent poll loop (this is what the Colab notebook executes).",
+        description=(
+            "Claim and execute queued jobs until the idle budget or the session "
+            "limit runs out. Exiting when idle matters: a poller holding an A100 "
+            "keeps burning Colab compute units for nothing."
+        ),
+    )
+    _add_store_args(p)
+    p.add_argument("--repo-dir", default="/content/codenames-interpretability")
+    p.add_argument("--log-dir", default="/content/logs")
+    p.add_argument("--idle-shutdown-minutes", type=float, default=30.0)
+    p.add_argument("--max-session-hours", type=float, default=11.0)
+    p.add_argument("--skip-git", action="store_true",
+                   help="Do not fetch/reset the repo before each job.")
+    return p
+
+
+def _cmd_job_runner(args) -> int:
+    from pathlib import Path
+
+    from codenames.remote.runner import RunnerConfig, run_agent_loop
+
+    store = _open_remote_store(args)
+    cfg = RunnerConfig(
+        repo_dir=Path(args.repo_dir),
+        jobs_root=Path(args.jobs_dir) if args.jobs_dir else Path("."),
+        local_log_dir=Path(args.log_dir),
+        idle_shutdown_minutes=args.idle_shutdown_minutes,
+        max_session_hours=args.max_session_hours,
+        skip_git=args.skip_git,
+    )
+    return run_agent_loop(cfg, store=store)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="codenames-experiment",
@@ -1277,6 +1549,12 @@ def main(argv=None) -> int:
     _make_lens_tune_parser(sp)
     _make_lens_apply_parser(sp)
     _make_lens_analyze_parser(sp)
+    _make_job_submit_parser(sp)
+    _make_job_status_parser(sp)
+    _make_job_logs_parser(sp)
+    _make_job_cancel_parser(sp)
+    _make_job_sync_parser(sp)
+    _make_job_runner_parser(sp)
 
     args = parser.parse_args(argv)
 
@@ -1304,6 +1582,18 @@ def main(argv=None) -> int:
         return _cmd_lens_apply(args)
     if args.command == "lens-analyze":
         return _cmd_lens_analyze(args)
+    if args.command == "job-submit":
+        return _cmd_job_submit(args)
+    if args.command == "job-status":
+        return _cmd_job_status(args)
+    if args.command == "job-logs":
+        return _cmd_job_logs(args)
+    if args.command == "job-cancel":
+        return _cmd_job_cancel(args)
+    if args.command == "job-sync":
+        return _cmd_job_sync(args)
+    if args.command == "job-runner":
+        return _cmd_job_runner(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
