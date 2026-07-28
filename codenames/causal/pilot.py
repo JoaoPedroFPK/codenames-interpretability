@@ -21,7 +21,7 @@ materially raises the budget, which is re-costed before proceeding.
 """
 
 import os
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -123,7 +123,7 @@ def run_pilot(
     chat_template_strategy: str,
     num_layers: int,
     hidden_dim: int,
-    device: str = "cpu",
+    device: Optional[str] = None,
     seed: int = 2026,
     alphas: Sequence[float] = (-4.0, -1.0, 1.0, 4.0),
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
@@ -132,6 +132,11 @@ def run_pilot(
     Composes the tested primitives; contains no methodology of its own. Every
     measurement here is a property of the machinery, never of the hypotheses
     (see the anti-peeking rule in this module's docstring).
+
+    ``device`` defaults to **the device the model is already on**, rather than
+    to a constant. A hardcoded default silently disagreed with a CUDA-resident
+    model and every forward pass died with "Expected all tensors to be on the
+    same device"; inferring it from the model makes that mismatch impossible.
     """
     import time
 
@@ -146,6 +151,9 @@ def run_pilot(
     from .patch import all_sites, run_patch
     from .positions import answer_position
     from .steer import random_direction, steer_generate
+
+    if device is None:
+        device = str(next(model.parameters()).device)
 
     os.makedirs(base_dir, exist_ok=True)
     mode_flag = mode == "with_social"

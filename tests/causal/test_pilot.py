@@ -143,3 +143,30 @@ def test_pilot_identities_hold_on_a_real_model(tiny, tmp_path):
     )
     assert results["P2"] == pytest.approx(1.0, abs=0.02), "full-stack patch identity"
     assert abs(results["P3"]) <= 0.02, "null patch identity"
+
+
+def test_run_pilot_infers_device_from_the_model(tiny, tmp_path):
+    """Regression: a hardcoded device default broke every CUDA forward pass.
+
+    The pilot must take its device from the model it was handed, so the two
+    can never disagree ("Expected all tensors to be on the same device").
+    """
+    import inspect
+    from codenames.causal.pilot import run_pilot
+
+    assert inspect.signature(run_pilot).parameters["device"].default is None
+    src = inspect.getsource(run_pilot)
+    assert "next(model.parameters()).device" in src
+
+
+def test_pilot_runs_on_whatever_device_the_model_is_on(tiny, tmp_path):
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, gen = _pilot_fixtures(tmp_path)
+    report, results = run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=gen,
+        base_dir=str(tmp_path), prefix="tiny", mode="no_social",
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, seed=2026,
+    )
+    assert results["P2"] == pytest.approx(1.0, abs=0.02)
