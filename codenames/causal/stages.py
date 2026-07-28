@@ -10,6 +10,7 @@ that must be resumable.
 """
 
 import os
+import warnings
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -19,6 +20,7 @@ from ..data import GIVER_COLS, extract_giver_features
 from ..lens.readout import build_token_table
 from ..prompts import build_prompt
 from .attribution import attribution_scan, top_sites
+from .basis import ROLES, collapse_grid, role_of_each_token, role_positions
 from .metrics import logit_difference
 from .pairs import build_pair_table
 from .patch import all_sites, layer_window, run_patch
@@ -37,7 +39,7 @@ class _Context:
     """Prompts, pairs and per-pair caches shared by every stage."""
 
     def __init__(self, *, model, tokenizer, df_sample, chat_template_strategy,
-                 mode, seed, device=None):
+                 mode, seed, device=None, generation_csv=None):
         import torch
 
         self.torch = torch
@@ -48,6 +50,8 @@ class _Context:
         self.seed = seed
         self.device = device or str(next(model.parameters()).device)
         self.by_id = df_sample.set_index("row_id")
+        self.generations = self._load_generations(generation_csv)
+        self.no_p_star = 0
 
         hint_tokens = {
             int(r.row_id): len(tokenizer.encode(str(r.output), add_special_tokens=False))
@@ -57,6 +61,51 @@ class _Context:
             df_sample, hint_tokens, seed=seed, match_length=True,
             prompt_length_fn=self.prompt_len,
         )
+
+    @staticmethod
+    def _load_generations(path):
+        if not path:
+            return None
+        frame = pd.read_csv(path)
+        return frame.set_index("row_id") if "row_id" in frame.columns else None
+
+    def measurement(self, row_id: int, clean_prompt: str):
+        """``(scored_suffix, p_star)`` for this turn under §4.1.
+
+        The primary measurement position is the **answer position** ``p*``, not
+        the generating position: on Mistral only 13.0% of turns emit the answer
+        word first, so for the other 87% the final prompt token precedes 10+
+        scaffolding tokens and reads a token the model is not about to emit.
+        Because that deficit is model-specific (Qwen 91.5%), measuring at the
+        generating position would confound RQ3's cross-architecture comparison
+        with response format -- the error v3 exists to correct.
+
+        Following §12.3, the turn's own recorded generation is teacher-forced
+        onto the sequence, so the corrupted and patched runs each cost one
+        forward pass rather than a generation. §5A length-matches the clean and
+        donor prompts, so appending the *clean* generation to both leaves ``p*``
+        at the same index in either run.
+
+        Returns ``("", -1)`` when no generation is available, which falls back
+        to the generating position -- correct for the calibration channel and
+        for models with no recorded generations (the random-init null).
+        """
+        from .positions import answer_position
+
+        if self.generations is None or row_id not in self.generations.index:
+            return "", -1
+        row = self.generations.loc[row_id]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        text, word = row.get("generated_text"), row.get("generated_word")
+        if not isinstance(text, str) or not isinstance(word, str):
+            self.no_p_star += 1
+            return "", -1
+        position = answer_position(self.tokenizer, clean_prompt, text, word)
+        if position is None:
+            self.no_p_star += 1
+            return "", -1
+        return text, int(position)
 
     def prompt(self, row_id: int, hint: str) -> str:
         row = self.by_id.loc[row_id]
@@ -76,65 +125,102 @@ class _Context:
     def table(self, row_id: int) -> Dict[str, List[int]]:
         return build_token_table(self.tokenizer, list(self.by_id.loc[row_id, "candidates"]))
 
-    def clean_cache(self, prompt: str):
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+    def roles(self, pair, prompt: str, n_positions: int) -> np.ndarray:
+        """Per-token role vector for this pair's clean prompt (basis.py).
+
+        The corrupted prompt shares the role layout: §5A guarantees the two
+        tokenise to the same length, and the donor hint occupies the same span.
+        """
+        return role_of_each_token(
+            self.tokenizer, prompt, hint=str(pair.hint),
+            candidates=list(self.by_id.loc[pair.row_id, "candidates"]),
+            clean_target=str(pair.clean_target),
+            donor_target=str(pair.donor_target),
+            n_positions=n_positions,
+        )
+
+    def clean_cache(self, text: str, p_star: int = -1):
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         with self.torch.no_grad():
             out = self.model(**inputs, output_hidden_states=True)
         cache = [h.detach().clone() for h in out.hidden_states]
-        logits = out.logits[0, -1].detach().float().cpu().numpy()
+        logits = out.logits[0, p_star].detach().float().cpu().numpy()
         return cache, logits, int(inputs["input_ids"].shape[1])
 
-    def corrupt_logits(self, prompt: str) -> np.ndarray:
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+    def corrupt_logits(self, text: str, p_star: int = -1) -> np.ndarray:
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         with self.torch.no_grad():
             out = self.model(**inputs)
-        return out.logits[0, -1].detach().float().cpu().numpy()
+        return out.logits[0, p_star].detach().float().cpu().numpy()
 
 
 def run_scan_stage(
     *, model, tokenizer, df_sample, chat_template_strategy, mode, seed,
     top_k: int = 200, per_layer: bool = False, device: Optional[str] = None,
+    generation_csv: Optional[str] = None,
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """Attribution screen over the grid; returns the mean grid and ranked loci.
+
+    The grid is aggregated on the **role basis** (``basis.py``), not on absolute
+    token index. Prompts vary in token length across turns, so position ``p``
+    names a different thing in every turn and a mean over absolute indices is
+    not an aggregate of anything; on the first real run it did not even have a
+    consistent shape. Each turn's ``(layer, position)`` grid is collapsed to
+    ``(layer, role)`` and averaged across turns, skipping roles a turn lacks.
 
     SCREENING ONLY (§3.4): the returned loci carry no inferential claim and
     every one of them is confirmed with a real patch in stage 2.
     """
     ctx = _Context(model=model, tokenizer=tokenizer, df_sample=df_sample,
                    chat_template_strategy=chat_template_strategy, mode=mode,
-                   seed=seed, device=device)
+                   seed=seed, device=device, generation_csv=generation_csv)
 
-    total: Optional[np.ndarray] = None
-    counted = 0
+    collapsed: List[np.ndarray] = []
     for pair in ctx.pairs.itertuples():
         clean_prompt = ctx.prompt(pair.row_id, pair.hint)
         corrupt_prompt = ctx.prompt(pair.row_id, pair.donor_hint)
-        cache, _, _ = ctx.clean_cache(clean_prompt)
+        suffix, p_star = ctx.measurement(pair.row_id, clean_prompt)
+        cache, _, n_positions = ctx.clean_cache(clean_prompt + suffix, p_star)
         grid = attribution_scan(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt, readout_table=ctx.table(pair.row_id),
+            corrupt_prompt=corrupt_prompt + suffix,
+            readout_table=ctx.table(pair.row_id),
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=-1, device=ctx.device,
+            p_star=p_star, device=ctx.device,
         )
-        total = grid.copy() if total is None else total + grid
-        counted += 1
+        collapsed.append(collapse_grid(grid, ctx.roles(pair, clean_prompt, n_positions)))
 
-    if total is None:
+    if ctx.no_p_star:
+        print(f"  [scan] {ctx.no_p_star} turns had no resolvable p*; "
+              f"measured at the generating position instead (§4.1)")
+
+    if not collapsed:
         raise ValueError("no aligned pairs; cannot run the attribution scan")
 
-    mean_grid = total / counted
+    stack = np.stack(collapsed)
+    # A role absent from EVERY turn makes nanmean warn about an empty slice.
+    # That is the defined outcome (the role stays NaN, see collapse_grid), not
+    # a numerical problem, and on a real run the warning would repeat per call.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean_grid = np.nanmean(stack, axis=0)
+    # A role absent from every turn stays out of the ranking rather than
+    # ranking as an exact zero, which would read as a measured null effect.
+    ranked = np.nan_to_num(mean_grid, nan=0.0)
+
     if per_layer:
-        # One locus per layer: the strongest position at each depth. This is
-        # what yields a causal-effect CURVE over depth (RQ1 / the triangulation
+        # One locus per layer: the strongest role at each depth. This is what
+        # yields a causal-effect CURVE over depth (RQ1 / the triangulation
         # figure) rather than a scatter of globally-strongest cells, which can
         # all sit at one depth.
-        sites = [(int(layer), int(np.argmax(np.abs(mean_grid[layer]))))
-                 for layer in range(mean_grid.shape[0])]
+        sites = [(int(layer), int(np.argmax(np.abs(ranked[layer]))))
+                 for layer in range(ranked.shape[0])]
     else:
-        sites = top_sites(mean_grid, k=top_k)
+        sites = top_sites(ranked, k=top_k)
     loci = pd.DataFrame(
-        [{"layer": l, "position": p, "score": float(mean_grid[l, p])}
-         for l, p in sites]
+        [{"layer": l, "role": ROLES[r], "score": float(mean_grid[l, r]),
+          "n_turns": int(np.isfinite(stack[:, l, r]).sum())}
+         for l, r in sites]
     )
     return mean_grid, loci
 
@@ -146,6 +232,7 @@ def run_patch_stage(
     checkpoint_dir: Optional[str] = None, prefix: str = "causal",
     resume: bool = False, flush_every: int = 25,
     stop_after_pairs: Optional[int] = None,
+    generation_csv: Optional[str] = None,
 ) -> pd.DataFrame:
     """Real patches on the candidate loci; one row per (locus, width, turn).
 
@@ -163,7 +250,7 @@ def run_patch_stage(
     from .. import checkpoint
     ctx = _Context(model=model, tokenizer=tokenizer, df_sample=df_sample,
                    chat_template_strategy=chat_template_strategy, mode=mode,
-                   seed=seed, device=device)
+                   seed=seed, device=device, generation_csv=generation_csv)
 
     ckpt_prefix = f"{prefix}_patch"
     rows: List[Dict[str, object]] = []
@@ -202,30 +289,52 @@ def run_patch_stage(
             break
         clean_prompt = ctx.prompt(pair.row_id, pair.hint)
         corrupt_prompt = ctx.prompt(pair.row_id, pair.donor_hint)
-        cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt)
+        # Teacher-force the clean generation onto both runs so the readout sits
+        # at the answer position p* rather than the generating position (§4.1,
+        # §12.3). §5A length-matches the two prompts, so p* is the same index
+        # in the clean and corrupted sequences.
+        suffix, p_star = ctx.measurement(pair.row_id, clean_prompt)
+        cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt + suffix, p_star)
         table = ctx.table(pair.row_id)
 
         ld_clean = logit_difference(clean_logits, table,
                                     pair.clean_target, pair.donor_target)
-        ld_corrupt = logit_difference(ctx.corrupt_logits(corrupt_prompt), table,
-                                      pair.clean_target, pair.donor_target)
+        ld_corrupt = logit_difference(
+            ctx.corrupt_logits(corrupt_prompt + suffix, p_star), table,
+            pair.clean_target, pair.donor_target)
         shared = dict(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt, readout_table=table,
+            corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=-1, device=ctx.device,
+            p_star=p_star, device=ctx.device,
             ld_clean=ld_clean, ld_corrupt=ld_corrupt,
         )
 
+        # A locus names a (layer, role); the role resolves to THIS turn's own
+        # token indices. That is what makes the intervention statable across
+        # turns -- "patch the clean hint span at layer 5" has a sufficiency
+        # reading, "patch position 47" does not.
+        by_role = role_positions(ctx.roles(pair, clean_prompt, n_positions))
+
         for locus in loci.itertuples():
-            if locus.position >= n_positions:
+            positions = by_role.get(str(locus.role))
+            if not positions:
+                # Role absent from this turn: recorded as NaN, not dropped, so
+                # downstream counts stay honest about coverage.
+                for width in window_widths:
+                    shard.append({
+                        "layer": int(locus.layer), "role": str(locus.role),
+                        "n_positions": 0, "width": int(width),
+                        "row_id": int(pair.row_id), "effect": float("nan"),
+                    })
                 continue
             for width in window_widths:
                 band = layer_window(int(locus.layer), int(width), len(cache))
-                sites = [(l, int(locus.position)) for l in band]
+                sites = [(l, p) for l in band for p in positions]
                 shard.append({
-                    "layer": int(locus.layer), "position": int(locus.position),
-                    "width": int(width), "row_id": int(pair.row_id),
+                    "layer": int(locus.layer), "role": str(locus.role),
+                    "n_positions": len(positions), "width": int(width),
+                    "row_id": int(pair.row_id),
                     "effect": run_patch(sites=sites, **shared),
                 })
         if progress is not None:

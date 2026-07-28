@@ -27,10 +27,31 @@ def _frame():
     ])
 
 
-def _common(tiny):
+def _ragged_frame():
+    """Turns whose prompts tokenise to DIFFERENT lengths.
+
+    Every fixture above happens to hold boards of equal size and similar words,
+    so every prompt came out the same length and the scan's cross-turn
+    aggregation looked fine. On the real corpus it crashed with
+    `operands could not be broadcast together with shapes (33,118) (33,108)`.
+    Ragged boards are the condition the aggregation actually has to survive.
+    """
+    return pd.DataFrame([
+        {"row_id": 1, "output": "water", "targets": ["sea"], "black": ["moon"],
+         "tan": ["ship"], "candidates": ["moon", "sea"]},
+        {"row_id": 2, "output": "rocket", "targets": ["moon"], "black": ["sea"],
+         "tan": ["ship"], "candidates": ["moon", "sea", "ship", "castle",
+                                         "engine", "telescope"]},
+        {"row_id": 3, "output": "harbour", "targets": ["ship"], "black": ["sea"],
+         "tan": ["moon"], "candidates": ["moon", "sea", "ship", "anchor"]},
+    ])
+
+
+def _common(tiny, df=None):
     model, tok = tiny
     return dict(
-        model=model, tokenizer=tok, df_sample=_frame(),
+        model=model, tokenizer=tok,
+        df_sample=_frame() if df is None else df,
         chat_template_strategy="raw", mode="no_social", seed=2026,
     )
 
@@ -38,9 +59,16 @@ def _common(tiny):
 # --- scan ------------------------------------------------------------------
 
 def test_scan_returns_a_grid_and_ranked_loci(tiny, tmp_path):
+    from codenames.causal.basis import ROLE_INDEX
     grid, loci = run_scan_stage(**_common(tiny), top_k=4)
-    assert grid.ndim == 2 and np.isfinite(grid).all()
-    assert list(loci.columns) >= ["layer", "position", "score"]
+    assert grid.ndim == 2
+    # With no generation CSV nothing is teacher-forced, so the `generation`
+    # role has no tokens and stays NaN -- an absent role must not read as a
+    # measured zero effect.
+    measured = np.delete(grid, ROLE_INDEX["generation"], axis=1)
+    assert np.isfinite(measured).all()
+    assert np.isnan(grid[:, ROLE_INDEX["generation"]]).all()
+    assert list(loci.columns) >= ["layer", "role", "score"]
     assert len(loci) == 4
     # ranked strongest first
     assert (loci["score"].abs().diff().dropna() <= 1e-9).all()
@@ -51,12 +79,110 @@ def test_scan_top_k_is_bounded_by_the_grid(tiny):
     assert len(loci) == grid.size
 
 
+# --- the regression the role basis exists for ------------------------------
+
+def test_scan_survives_turns_with_different_prompt_lengths(tiny):
+    """The real failure: prompts of unequal token length made the cross-turn
+    aggregate raise a broadcast error. The role basis gives every turn the same
+    grid width regardless of board size."""
+    from codenames.causal.basis import ROLES
+    grid, loci = run_scan_stage(**_common(tiny, _ragged_frame()), top_k=4)
+    assert grid.shape[1] == len(ROLES)
+    assert len(loci) == 4
+
+
+def test_scan_grid_width_is_independent_of_the_draw(tiny):
+    """Two draws with different boards must produce directly comparable grids;
+    otherwise no cross-model or cross-condition comparison is defined."""
+    from codenames.causal.basis import ROLES
+    a, _ = run_scan_stage(**_common(tiny), top_k=1)
+    b, _ = run_scan_stage(**_common(tiny, _ragged_frame()), top_k=1)
+    assert a.shape[1] == b.shape[1] == len(ROLES)
+
+
+def test_patch_survives_turns_with_different_prompt_lengths(tiny):
+    """A locus names a role, so it resolves to each turn's own token indices
+    even though those indices differ between turns."""
+    df = _ragged_frame()
+    _, loci = run_scan_stage(**_common(tiny, df), top_k=3)
+    out = run_patch_stage(**_common(tiny, df), loci=loci, window_widths=(1,))
+    assert out["row_id"].nunique() >= 2
+    assert out["effect"].notna().any()
+
+
+def test_a_role_absent_from_a_turn_is_nan_not_a_measured_zero(tiny):
+    """Every (locus, width, turn) cell is recorded. Dropping the absent ones
+    would make coverage look complete when it is not."""
+    df = _ragged_frame()
+    _, loci = run_scan_stage(**_common(tiny, df), top_k=3)
+    out = run_patch_stage(**_common(tiny, df), loci=loci, window_widths=(1,))
+    per_turn = out.groupby("row_id").size()
+    assert per_turn.nunique() == 1, "every turn must report every locus"
+    assert (out.loc[out["n_positions"] == 0, "effect"].isna()).all()
+
+
+# --- the answer position p* (spec §4.1) ------------------------------------
+
+def _generation_csv(tmp_path, scaffolded: bool):
+    """Recorded generations. `scaffolded` mimics Mistral's dominant format,
+    where the answer word sits 10+ tokens behind a preamble -- 87% of its turns.
+    """
+    lead = "The word that best matches the hint is " if scaffolded else ""
+    rows = [{"row_id": 1, "generated_text": lead + "sea", "generated_word": "sea"},
+            {"row_id": 2, "generated_text": lead + "moon", "generated_word": "moon"}]
+    path = tmp_path / f"gen_{'scaffolded' if scaffolded else 'wordfirst'}.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return str(path)
+
+
+def test_supplying_generations_moves_the_readout_off_the_final_token(tiny, tmp_path):
+    """The §4.1 correction. Without generations the readout is the generating
+    position; with them it is the answer position p*, which for a scaffolded
+    generation is a different token entirely. If the two agreed, p* would not
+    be being used."""
+    gen = _generation_csv(tmp_path, scaffolded=True)
+    without, _ = run_scan_stage(**_common(tiny), top_k=1)
+    with_p_star, _ = run_scan_stage(**_common(tiny), top_k=1, generation_csv=gen)
+    assert not np.allclose(np.nan_to_num(without), np.nan_to_num(with_p_star)), \
+        "p* readout is identical to the generating-position readout"
+
+
+def test_teacher_forced_generation_gets_its_own_role(tiny, tmp_path):
+    """The appended generation must not be pooled into the question scaffold:
+    it falls past the last candidate, where the positional default would
+    otherwise label it `question`."""
+    from codenames.causal.basis import ROLE_INDEX
+    gen = _generation_csv(tmp_path, scaffolded=True)
+    grid, _ = run_scan_stage(**_common(tiny), top_k=1, generation_csv=gen)
+    assert np.isfinite(grid[:, ROLE_INDEX["generation"]]).any()
+    assert np.isfinite(grid[:, ROLE_INDEX["final"]]).any(), \
+        "the generating position must survive as its own role"
+
+
+def test_patch_stage_accepts_generations_and_stays_finite(tiny, tmp_path):
+    gen = _generation_csv(tmp_path, scaffolded=True)
+    _, loci = run_scan_stage(**_common(tiny), top_k=2, generation_csv=gen)
+    out = run_patch_stage(**_common(tiny), loci=loci, window_widths=(1,),
+                          generation_csv=gen)
+    assert out["effect"].notna().any()
+
+
+def test_missing_generations_fall_back_without_crashing(tiny, tmp_path):
+    """The random-init null has no recorded generations by construction."""
+    path = tmp_path / "empty.csv"
+    pd.DataFrame({"row_id": [], "generated_text": [],
+                  "generated_word": []}).to_csv(path, index=False)
+    grid, loci = run_scan_stage(**_common(tiny), top_k=1,
+                                generation_csv=str(path))
+    assert len(loci) == 1
+
+
 # --- patch -----------------------------------------------------------------
 
 def test_patch_stage_emits_per_turn_effects(tiny):
     _, loci = run_scan_stage(**_common(tiny), top_k=2)
     out = run_patch_stage(**_common(tiny), loci=loci, window_widths=(1,))
-    assert {"layer", "position", "row_id", "effect", "width"} <= set(out.columns)
+    assert {"layer", "role", "row_id", "effect", "width"} <= set(out.columns)
     assert len(out) > 0
     # one row per (locus, width, measured pair)
     assert out["row_id"].nunique() >= 1
@@ -119,8 +245,8 @@ def test_resume_is_byte_identical_to_an_uninterrupted_run(tiny, tmp_path):
                               resume=True)
 
     pd.testing.assert_frame_equal(
-        full.sort_values(["row_id", "layer", "position", "width"]).reset_index(drop=True),
-        resumed.sort_values(["row_id", "layer", "position", "width"]).reset_index(drop=True),
+        full.sort_values(["row_id", "layer", "role", "width"]).reset_index(drop=True),
+        resumed.sort_values(["row_id", "layer", "role", "width"]).reset_index(drop=True),
     )
 
 

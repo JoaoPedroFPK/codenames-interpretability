@@ -48,8 +48,14 @@ def patching_heatmap(
     claimed_sites: Sequence[Tuple[int, int]] = (),
     title: str = "",
     metric_label: str = "normalized effect e",
+    x_labels: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Heatmap over (layer, position); claimed loci ringed."""
+    """Heatmap over (layer, role); claimed loci ringed.
+
+    The x axis is the role basis of ``causal/basis.py``, not absolute token
+    index: prompts differ in length across turns, so an absolute index is not
+    comparable between them (see that module for the argument).
+    """
     import matplotlib.pyplot as plt
 
     values = np.asarray(grid, dtype=float)
@@ -73,7 +79,12 @@ def patching_heatmap(
             (position - 0.5, layer - 0.5), 1, 1,
             fill=False, edgecolor=_CLAIM_COLOR, linewidth=1.6,
         ))
-    ax.set_xlabel("token position")
+    if x_labels is not None:
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels(list(x_labels), rotation=45, ha="right")
+        ax.set_xlabel("prompt role")
+    else:
+        ax.set_xlabel("token position")
     ax.set_ylabel("layer")
     if title:
         ax.set_title(title)

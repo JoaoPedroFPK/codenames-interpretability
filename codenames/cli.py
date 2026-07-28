@@ -1587,9 +1587,17 @@ def _make_causal_scan_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=200,
                    help="Loci carried into stage 2 (budget ceiling, not a prediction).")
     p.add_argument("--per-layer", action="store_true",
-                   help="Select the strongest position at EACH layer instead of "
+                   help="Select the strongest role at EACH layer instead of "
                         "the global top-k, yielding a causal-effect curve over "
                         "depth for the triangulation figure.")
+    p.add_argument("--generation-csv", default=None,
+                   help="Recorded generations that fix the answer position p* "
+                        "(spec 4.1). Defaults to the conventional per-model "
+                        "path; absent generations fall back to the generating "
+                        "position and say so.")
+    p.add_argument("--no-generations", action="store_true",
+                   help="This model has no recorded generations (the "
+                        "random-init null); measure at the generating position.")
     return p
 
 
@@ -1608,6 +1616,14 @@ def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
                    help="Contiguous layer-band widths; 1 is single-site.")
     p.add_argument("--validation-fraction", type=float, default=0.10,
                    help="Random grid share patched regardless of attribution score.")
+    p.add_argument("--generation-csv", default=None,
+                   help="Recorded generations that fix the answer position p* "
+                        "(spec 4.1). Defaults to the conventional per-model "
+                        "path; absent generations fall back to the generating "
+                        "position and say so.")
+    p.add_argument("--no-generations", action="store_true",
+                   help="This model has no recorded generations (the "
+                        "random-init null); measure at the generating position.")
     p.add_argument("--resume", action="store_true")
     return p
 

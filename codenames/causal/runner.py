@@ -110,6 +110,30 @@ def cmd_extract(args) -> int:
     return 0
 
 
+def _generation_csv(args, paths) -> Optional[str]:
+    """Recorded generations, which fix the answer position p* (spec §4.1).
+
+    Explicit flag wins; otherwise the conventional per-model path is used when
+    it exists. Absent generations are not an error -- the random-init null has
+    none by construction -- but they downgrade the readout to the generating
+    position, so the caller says so out loud rather than leaving it implicit.
+    """
+    explicit = getattr(args, "generation_csv", None)
+    if explicit:
+        return explicit
+    if getattr(args, "no_generations", False):
+        print("  [p*] --no-generations: measuring at the generating position")
+        return None
+    guess = os.path.join(
+        paths["base"], f"{paths['prefix']}_generation_{args.condition}.csv")
+    if os.path.exists(guess):
+        print(f"  [p*] answer position resolved from {guess}")
+        return guess
+    print(f"  [p*] no generations at {guess}; measuring at the GENERATING "
+          f"position, which is the §4.1 secondary channel, not the primary one")
+    return None
+
+
 def cmd_scan(args) -> int:
     """Stage 1: attribution screen. Carries no inferential claim (§3.4)."""
     from .stages import run_scan_stage
@@ -124,6 +148,7 @@ def cmd_scan(args) -> int:
         chat_template_strategy=meta["chat_template_strategy"],
         mode=args.condition, seed=args.seed, top_k=args.top_k,
         per_layer=bool(getattr(args, 'per_layer', False)),
+        generation_csv=_generation_csv(args, paths),
     )
     np.save(paths["scan"], grid)
     loci_path = paths["scan"].replace(".npy", "_loci.csv")
@@ -155,6 +180,7 @@ def cmd_patch(args) -> int:
         mode=args.condition, seed=args.seed, loci=loci, window_widths=widths,
         checkpoint_dir=os.path.join(paths["base"], "checkpoints"),
         prefix=paths["prefix"], resume=bool(getattr(args, "resume", False)),
+        generation_csv=_generation_csv(args, paths),
     )
     effects.to_parquet(paths["effects"], index=False)
     finite = int(effects["effect"].notna().sum())
@@ -249,13 +275,13 @@ def cmd_analyze(args) -> int:
         )
 
     effects = pd.read_parquet(paths["effects"])
-    required = {"layer", "position", "row_id", "effect"}
+    required = {"layer", "role", "row_id", "effect"}
     missing = required - set(effects.columns)
     if missing:
         raise ValueError(f"effects table missing columns {sorted(missing)}")
 
     rows: List[Dict[str, object]] = []
-    for (layer, position), block in effects.groupby(["layer", "position"]):
+    for (layer, role), block in effects.groupby(["layer", "role"]):
         values = block["effect"].to_numpy(dtype=float)
         finite = np.isfinite(values)
         if not finite.any():
@@ -265,7 +291,7 @@ def cmd_analyze(args) -> int:
             n_boot=args.n_boot, seed=args.seed,
         )
         rows.append({
-            "layer": int(layer), "position": int(position),
+            "layer": int(layer), "role": str(role),
             "mean_effect": float(values[finite].mean()),
             "ci_low": low, "ci_high": high,
             "excludes_zero": bool(low > 0 or high < 0),
