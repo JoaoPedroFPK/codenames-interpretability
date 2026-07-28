@@ -1528,7 +1528,150 @@ def _cmd_job_runner(args) -> int:
     return run_agent_loop(cfg, store=store)
 
 
-def main(argv=None) -> int:
+# --------------------------------------------------------------------------
+# Causal tier (docs/specs/causal_spec.md v3). Handlers import codenames.causal
+# lazily so `--help` never pays for torch.
+# --------------------------------------------------------------------------
+
+_CAUSAL_MODELS = ("mistral", "qwen", "qwen_random")
+_CAUSAL_SCHEMES = ("counterfactual", "noise")
+_PILOT_N = 150         # §12.5 pilot draw
+_CONFIRMATORY_N = 1500  # §4.2 committed sample size
+
+
+def _add_causal_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--model", required=True, choices=list(_CAUSAL_MODELS))
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--seed", type=int, default=2026,
+                   help="CONTRACT_V1.random_seed; do not change.")
+
+
+def _make_causal_extract_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-extract",
+        help="Paired clean/corrupted forwards over the seeded subsample.",
+        description=(
+            "Builds the symmetric-counterfactual pair table (§5A) and caches "
+            "clean and corrupted per-layer states. Pairs whose prompts differ "
+            "in token count are dropped and logged: patching (layer, position) "
+            "across misaligned sequences reads the wrong position."
+        ),
+    )
+    _add_causal_common(p)
+    p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
+    p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--noise-sigma", type=float, default=3.0,
+                   help="Multiples of the embedding component SD (ROME setting).")
+    return p
+
+
+def _make_causal_scan_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-scan",
+        help="Attribution-patching screen over the (layer, position) grid.",
+        description=(
+            "Stage 1 of the two-stage design. SCREENING ONLY - carries no "
+            "inferential claim (§3.4). Every locus it surfaces must be "
+            "confirmed with a real patch."
+        ),
+    )
+    _add_causal_common(p)
+    p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--top-k", type=int, default=200,
+                   help="Loci carried into stage 2 (budget ceiling, not a prediction).")
+    return p
+
+
+def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-patch",
+        help="Real patches on candidate loci (resumable; the expensive stage).",
+    )
+    _add_causal_common(p)
+    p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--window-widths", default="1,3,5",
+                   help="Contiguous layer-band widths; 1 is single-site.")
+    p.add_argument("--validation-fraction", type=float, default=0.10,
+                   help="Random grid share patched regardless of attribution score.")
+    p.add_argument("--resume", action="store_true")
+    return p
+
+
+def _make_causal_steer_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-steer",
+        help="Dose-response steering with the four pre-registered controls.",
+    )
+    _add_causal_common(p)
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--direction", default="lens", choices=["lens", "dom"],
+                   help="lens = label-free (primary); dom = label-fitted (robustness).")
+    p.add_argument("--sites", default="from_hint",
+                   choices=["from_hint", "hint_only", "generating"])
+    p.add_argument("--alphas", default="-8,-4,-2,-1,-0.5,0.5,1,2,4,8")
+    p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    return p
+
+
+def _make_causal_pilot_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-pilot",
+        help="Run the P1-P8 method-validation gate (required before the full run).",
+        description=(
+            "Validates the machinery on a seeded 150-turn draw from the "
+            "secondary condition, leaving the confirmatory sample untouched. "
+            "P1-P4 and P7 are blocking. Anti-peeking rule applies: only "
+            "nuisance parameters and pass/fail verdicts may inform the "
+            "confirmatory run - never effect locations."
+        ),
+    )
+    _add_causal_common(p)
+    p.add_argument("--dataset", help="Path to clue_generation.csv.")
+    p.add_argument("--sample-size", type=int, default=_PILOT_N)
+    p.add_argument("--condition", default="with_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--report-path", default=None,
+                   help="Where to write the P1-P8 table (default: output dir).")
+    return p
+
+
+def _make_causal_analyze_parser(sp) -> argparse.ArgumentParser:
+    p = sp.add_parser(
+        "causal-analyze",
+        help="FDR, cluster bootstrap, claim gate and figures (offline, no GPU).",
+    )
+    _add_causal_common(p)
+    p.add_argument("--condition", default="no_social",
+                   choices=["no_social", "with_social"])
+    p.add_argument("--q", type=float, default=0.05, help="BH-FDR level.")
+    p.add_argument("--n-boot", type=int, default=10000)
+    p.add_argument("--n-perm", type=int, default=1000)
+    p.add_argument("--figures", action="store_true")
+    return p
+
+
+def _cmd_causal(args) -> int:
+    """Dispatch the causal subcommands, importing torch-backed code lazily."""
+    from .causal import runner  # noqa: PLC0415  (lazy by design)
+
+    return runner.dispatch(args)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the full CLI parser.
+
+    Split out of ``main`` so the subcommand surface can be asserted in tests
+    without executing anything.
+    """
     parser = argparse.ArgumentParser(
         prog="codenames-experiment",
         description=(
@@ -1555,7 +1698,17 @@ def main(argv=None) -> int:
     _make_job_cancel_parser(sp)
     _make_job_sync_parser(sp)
     _make_job_runner_parser(sp)
+    _make_causal_extract_parser(sp)
+    _make_causal_scan_parser(sp)
+    _make_causal_patch_parser(sp)
+    _make_causal_steer_parser(sp)
+    _make_causal_pilot_parser(sp)
+    _make_causal_analyze_parser(sp)
+    return parser
 
+
+def main(argv=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
@@ -1594,6 +1747,8 @@ def main(argv=None) -> int:
         return _cmd_job_sync(args)
     if args.command == "job-runner":
         return _cmd_job_runner(args)
+    if args.command.startswith("causal-"):
+        return _cmd_causal(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
