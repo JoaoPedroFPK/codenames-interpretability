@@ -12,11 +12,33 @@ nothing on B: the corrupted run is degenerate rather than counterfactual and
 the §3.2 denominator is undefined.
 """
 
+import re
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+
+def substitute_hint(suffix: str, clean_hint: str, donor_hint: str) -> str:
+    """Counterfactual scaffold (amendment (l), 2026-07-30).
+
+    Teacher-forcing the CLEAN generation onto the corrupted run re-injects the
+    clean hint whenever the scaffold quotes it ('The hint "death" suggests
+    ...'), partially undoing the corruption — measured on the corrected
+    Mistral pilot: 79/130 turns leak, sign-violation rate 29.1% on leaking
+    turns vs 11.8% on clean ones, and P4 passes on the leak-free stratum.
+    The corrupted run therefore teacher-forces the clean generation with every
+    word-bounded mention of the clean hint replaced by the donor hint —
+    the same symmetry §5A applies to the prompt, extended to the scaffold.
+    Case-insensitive; compounds ("death-related") are replaced too, since
+    they leak equally. Joint sequences that stop length-matching after the
+    substitution are dropped and counted, mirroring the §5A alignment rule.
+    """
+    if not clean_hint:
+        return suffix
+    return re.sub(rf"\b{re.escape(clean_hint)}\b", donor_hint, suffix,
+                  flags=re.IGNORECASE)
 
 
 def hint_column(df: pd.DataFrame) -> str:

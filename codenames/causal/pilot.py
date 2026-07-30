@@ -256,9 +256,10 @@ def run_pilot(
     from ..prompts import build_prompt
     from .attribution import attribution_scan
     from .metrics import logit_difference
-    from .pairs import build_pair_table
+    from .pairs import build_pair_table, substitute_hint
     from .patch import all_sites, run_patch
-    from .positions import answer_position, is_word_first, readout_index
+    from .positions import (answer_position, is_word_first, readout_index,
+                            string_level_match)
     from .steer import random_direction, steer_generate
 
     if device is None:
@@ -320,6 +321,7 @@ def run_pilot(
                                # diagnosable without a new GPU run
 
     misaligned = 0
+    suffix_misaligned = 0
     rng = np.random.default_rng(seed)
     for pair in pairs.itertuples():
         clean_prompt = _prompt(pair.row_id, pair.hint)
@@ -383,7 +385,11 @@ def run_pilot(
             row_logits = joint_logits[p_read]
             predicted = int(row_logits.argmax())
             actual = int(ids[p_star])
-            hit = predicted == actual
+            # String-level fallback (amendment (l)): id inequality at the
+            # boundary is usually re-segmentation ("novel" vs "nov"), not a
+            # mis-index — see positions.string_level_match.
+            hit = predicted == actual or string_level_match(
+                tokenizer.decode([predicted]), tokenizer.decode([actual]))
             p1_hits.append(hit)
             margin = float(row_logits[predicted] - row_logits[actual])
             if not hit:
@@ -409,7 +415,18 @@ def run_pilot(
             table, pair.clean_target, pair.donor_target,
         )
 
-        corrupt_inputs = tokenizer(corrupt_prompt + suffix, return_tensors="pt").to(device)
+        # Counterfactual scaffold (amendment (l)): the corrupted run teacher-
+        # forces the clean generation with the clean hint's mentions replaced
+        # by the donor hint, so the scaffold cannot re-inject the corruption's
+        # own antidote. Joint sequences that stop length-matching are dropped
+        # and counted, mirroring the §5A rule.
+        corrupt_suffix = substitute_hint(suffix, str(pair.hint),
+                                         str(pair.donor_hint))
+        corrupt_inputs = tokenizer(corrupt_prompt + corrupt_suffix,
+                                   return_tensors="pt").to(device)
+        if corrupt_inputs["input_ids"].shape[1] != clean_inputs["input_ids"].shape[1]:
+            suffix_misaligned += 1
+            continue
         _t0 = time.perf_counter()
         with torch.no_grad():
             corrupt_logits = model(**corrupt_inputs).logits[0, p_read]
@@ -471,7 +488,7 @@ def run_pilot(
 
         shared = dict(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
+            corrupt_prompt=corrupt_prompt + corrupt_suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
             p_star=p_read, device=device, ld_clean=ld_clean, ld_corrupt=ld_corrupt,
         )
@@ -500,6 +517,7 @@ def run_pilot(
             "first_token_collision": bool(any(
                 w != pair.donor_target and (set(ids_) & donor_ids)
                 for w, ids_ in table.items() if ids_)),
+            "suffix_substituted": corrupt_suffix != suffix,
             "n_prompt_tokens": int(n_clean),
             "n_joint_tokens": int(n_positions),
         })
@@ -507,7 +525,7 @@ def run_pilot(
         # --- P5: attribution against a small set of real patches
         grid = attribution_scan(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
+            corrupt_prompt=corrupt_prompt + corrupt_suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
             p_star=p_read, device=device,
         )
@@ -629,6 +647,7 @@ def run_pilot(
         "n_pairs": int(len(pairs)),
         "n_measured": int(len(e_full)),
         "n_misaligned_dropped": int(misaligned),
+        "n_suffix_misaligned_dropped": int(suffix_misaligned),
         "alignment_yield": float(1.0 - misaligned / len(pairs)) if len(pairs) else 0.0,
     }
     if not e_full:

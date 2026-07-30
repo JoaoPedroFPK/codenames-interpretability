@@ -548,3 +548,17 @@ def test_pilot_warns_when_not_drawn_from_with_social(tiny, tmp_path, capsys):
     sample stays untouched. Running it on no_social must be loud."""
     _run_tiny_pilot(tiny, tmp_path, _SCAFFOLDED, mode="no_social")
     assert "with_social" in capsys.readouterr().out
+
+
+def test_pilot_substitutes_the_hint_in_the_corrupted_scaffold(tiny, tmp_path):
+    """Amendment (l): scaffolds that quote the clean hint would re-inject it
+    into the corrupted run; the per-turn row records the substitution."""
+    _run_tiny_pilot(tiny, tmp_path, [
+        {"row_id": 1, "generated_text": "the hint water suggests sea",
+         "generated_word": "sea"},
+        {"row_id": 2, "generated_text": "the hint rocket suggests moon",
+         "generated_word": "moon"},
+    ])
+    turns = pd.read_csv(tmp_path / "tiny_causal_pilot_turns_no_social.csv")
+    assert "suffix_substituted" in turns.columns
+    assert bool(turns.set_index("row_id").loc[1, "suffix_substituted"]) is True

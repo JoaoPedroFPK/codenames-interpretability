@@ -117,3 +117,26 @@ def test_turns_with_no_aligned_donor_are_dropped():
     out = build_pair_table(df, {1: 1, 2: 1, 3: 1}, seed=2026,
                            match_length=False, prompt_length_fn=prompt_len)
     assert 1 not in set(out["row_id"])
+
+
+# --- counterfactual scaffold (amendment (l), 2026-07-30) --------------------
+
+def test_substitute_hint_replaces_every_word_bounded_occurrence():
+    from codenames.causal.pairs import substitute_hint
+    s = 'The hint "death" suggests death-related words; death is the theme.'
+    out = substitute_hint(s, "death", "rocket")
+    # every word-bounded mention leaks the clean hint, including compounds
+    assert out == ('The hint "rocket" suggests rocket-related words; '
+                   'rocket is the theme.')
+
+
+def test_substitute_hint_is_case_insensitive_and_bounded():
+    from codenames.causal.pairs import substitute_hint
+    assert substitute_hint("Death and deathly hallows", "death", "rocket") \
+        == "rocket and deathly hallows"
+
+
+def test_substitute_hint_no_occurrence_is_identity():
+    from codenames.causal.pairs import substitute_hint
+    assert substitute_hint("word-first turns have empty scaffolds", "death",
+                           "rocket") == "word-first turns have empty scaffolds"

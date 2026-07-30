@@ -329,3 +329,37 @@ def test_scan_reads_logits_at_the_emitting_position(tiny, tmp_path, monkeypatch)
     p_star = answer_position(tok, prompt, text, "sea")
     assert p_star is not None and p_star > 0
     assert captured[0] == p_star - 1
+
+
+def test_scan_corrupted_run_gets_the_counterfactual_scaffold(
+        tiny, tmp_path, monkeypatch):
+    """The clean hint must not survive anywhere in the corrupted joint
+    sequence — neither in the prompt (§5A) nor in the teacher-forced
+    scaffold (amendment (l))."""
+    import codenames.causal.stages as stages
+
+    model, tok = tiny
+    gen_path = tmp_path / "gen.csv"
+    pd.DataFrame([
+        {"row_id": 1, "generated_text": "the hint water suggests sea",
+         "generated_word": "sea"},
+        {"row_id": 2, "generated_text": "the hint rocket suggests moon",
+         "generated_word": "moon"},
+    ]).to_csv(gen_path, index=False)
+
+    captured = []
+
+    def spy(**kwargs):
+        captured.append(kwargs["corrupt_prompt"])
+        cache = kwargs["clean_cache"]
+        return np.zeros((len(cache), cache[0].shape[1]))
+
+    monkeypatch.setattr(stages, "attribution_scan", spy)
+    run_scan_stage(**_common(tiny), generation_csv=str(gen_path))
+    assert captured
+    # row 1's clean hint is "water"; its donor is row 2 ("rocket"), so the
+    # corrupted joint for row 1 must contain no "water" at all.
+    row1 = [c for c in captured if "suggests sea" in c]
+    assert row1, "row 1 never reached the scan"
+    assert "water" not in row1[0].lower()
+    assert "rocket" in row1[0].lower()

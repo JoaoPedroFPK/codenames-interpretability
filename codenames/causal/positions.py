@@ -42,6 +42,28 @@ def readout_index(p_star: Optional[int]) -> int:
     return int(p_star) - 1
 
 
+def string_level_match(predicted_text: Optional[str],
+                       actual_text: Optional[str]) -> bool:
+    """P1 comparison at the string level (amendment (l), 2026-07-30).
+
+    At the prompt/generation boundary the JOINT tokenization can segment the
+    first generated tokens differently than generation time did: the model
+    decisively predicts "novel" while the re-tokenized recording holds the
+    first subword "nov", or two distinct ids share one surface ("tag"/"tag").
+    Measured on the corrected Mistral pilot, all 20 decisive P1 misses sat
+    exactly at p* == n_prompt_tokens with this signature. The recording is a
+    string, so string agreement — either decoded token a prefix of the other,
+    after stripping — is what P1's identity actually asserts; a genuinely
+    wrong prediction still fails.
+    """
+    if not isinstance(predicted_text, str) or not isinstance(actual_text, str):
+        return False
+    p, a = predicted_text.strip().lower(), actual_text.strip().lower()
+    if not p or not a:
+        return False
+    return p.startswith(a) or a.startswith(p)
+
+
 def is_word_first(generated_text: Optional[str], generated_word: Optional[str]) -> bool:
     """True when the generation opens with the parsed answer word."""
     if not isinstance(generated_text, str) or not isinstance(generated_word, str):

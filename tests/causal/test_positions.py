@@ -200,3 +200,20 @@ def test_readout_index_is_the_position_that_emits_p_star():
     assert readout_index(-1) == -1   # unresolved -> generating position
     assert readout_index(0) == -1
     assert readout_index(None) == -1
+
+
+def test_string_level_match_absorbs_boundary_retokenization():
+    """P1's identity is about the recorded STRING: at the prompt/generation
+    boundary the joint tokenization can segment differently than generation
+    time did (predicted 'novel' vs recorded first-subword 'nov', or two ids
+    with the same surface 'tag'/'tag'). Those are segmentation artifacts, not
+    indexing faults — a genuinely wrong prediction still fails."""
+    from codenames.causal.positions import string_level_match
+
+    assert string_level_match("novel", "nov") is True
+    assert string_level_match("nov", "novel") is True
+    assert string_level_match("tag", "tag") is True
+    assert string_level_match(" degree", "degree") is True
+    assert string_level_match("moon", "nov") is False
+    assert string_level_match("", "nov") is False
+    assert string_level_match("novel", "") is False
