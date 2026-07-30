@@ -159,6 +159,18 @@ def pilot_report(results: Dict[str, float]) -> pd.DataFrame:
         {"check": "P4_clean_acc", "what": "clean run answers its own target",
          "observed": results.get("P4_clean_accuracy"), "threshold": "recorded",
          "passed": True, "blocking": False},
+        {"check": "P4_flip_gen",
+         "what": "flip rate at the generating position (pre-fix instrument, A/B)",
+         "observed": results.get("P4_flip_gen"),
+         "threshold": "diagnostic only", "passed": True, "blocking": False},
+        {"check": "P4_clean_acc_gen",
+         "what": "clean accuracy at the generating position (A/B)",
+         "observed": results.get("P4_clean_accuracy_gen"),
+         "threshold": "diagnostic only", "passed": True, "blocking": False},
+        {"check": "p_star_resolved",
+         "what": "turns measured at p*-1 rather than the generating fallback",
+         "observed": results.get("n_p_star_resolved"),
+         "threshold": "recorded", "passed": True, "blocking": False},
         {"check": "P4_normalised",
          "what": "flip rate / clean accuracy (corruption works GIVEN the model can answer)",
          "observed": (
@@ -246,11 +258,16 @@ def run_pilot(
     from .metrics import logit_difference
     from .pairs import build_pair_table
     from .patch import all_sites, run_patch
-    from .positions import answer_position
+    from .positions import answer_position, is_word_first, readout_index
     from .steer import random_direction, steer_generate
 
     if device is None:
         device = str(next(model.parameters()).device)
+
+    if mode != "with_social":
+        print("  WARNING: causal_spec.md §12.5 draws the pilot from "
+              "with_social so the confirmatory no_social sample stays "
+              f"untouched; this run uses '{mode}'.")
 
     os.makedirs(base_dir, exist_ok=True)
     mode_flag = mode == "with_social"
@@ -298,6 +315,9 @@ def run_pilot(
     started, forwards = time.perf_counter(), 0
     fwd_seconds = 0.0          # forward-pass time ONLY (excludes backward + generate)
     clean_correct = []         # model answers its own clean hint -> P4 denominator
+    flips_gen, clean_correct_gen, ld_corrupts_gen = [], [], []
+    turn_rows = []             # per-turn persistence: gate failures must be
+                               # diagnosable without a new GPU run
 
     misaligned = 0
     rng = np.random.default_rng(seed)
@@ -318,60 +338,31 @@ def run_pilot(
 
         table = build_token_table(tokenizer, list(by_id.loc[pair.row_id, "candidates"]))
 
-        # --- P1: does p* land on the recorded generated token?
-        p_star = -1
+        # --- Measurement geometry (§4.1, corrected 2026-07-30). The turn's
+        # recorded generation is teacher-forced onto BOTH runs and every
+        # readout sits at p_read = p*-1, the position whose next-token
+        # distribution emits the answer (positions.readout_index). The first
+        # pilot read everything at the generating position while the
+        # confirmatory stages had moved to p*: it validated a geometry the
+        # confirmatory run does not use.
+        suffix, p_star, word_first = "", -1, False
         if generations is not None and pair.row_id in generations.index:
-            row = generations.loc[pair.row_id]
-            text, word = row.get("generated_text"), row.get("generated_word")
+            g = generations.loc[pair.row_id]
+            if isinstance(g, pd.DataFrame):
+                g = g.iloc[0]
+            text, word = g.get("generated_text"), g.get("generated_word")
             if isinstance(text, str) and isinstance(word, str):
+                word_first = is_word_first(text, word)
                 position = answer_position(tokenizer, clean_prompt, text, word)
                 if position is not None and position > 0:
-                    # Teacher-force the recorded generation and ask whether the
-                    # model's greedy prediction AT p*-1 reproduces the token
-                    # actually sitting at p*. Because the generation was greedy,
-                    # this must hold; a miss means p* is mis-indexed or the
-                    # teacher-forcing is wrong.
-                    #
-                    # Do NOT re-encode a prefix separately to derive the
-                    # expected token: BPE prompt tokenisation is not a prefix
-                    # of the joint tokenisation, so the ids would not line up
-                    # (see tests/causal/test_positions.py).
-                    joint = tokenizer(clean_prompt + text, return_tensors="pt").to(device)
-                    ids = joint["input_ids"][0]
-                    with torch.no_grad():
-                        joint_logits = model(**joint).logits[0]
-                    row_logits = joint_logits[position - 1]
-                    predicted = int(row_logits.argmax())
-                    actual = int(ids[position])
-                    hit = predicted == actual
-                    p1_hits.append(hit)
-                    margin = float(row_logits[predicted] - row_logits[actual])
-                    if not hit:
-                        # Margin between what the model predicts and what the
-                        # recording holds. A near-tie means numerical drift
-                        # (the generations were produced on an accelerated
-                        # path); a wide margin means something structural.
-                        p1_margins.append(margin)
-                        # Decisive misses are the ones that indicate a real
-                        # indexing fault rather than a near-tie flip.
-                        if margin >= PILOT_THRESHOLDS["P1_decisive_margin"]:
-                            p1_decisive_misses.append(margin)
-                            # Capture the case so a decisive miss can be
-                            # diagnosed instead of guessed at.
-                            p1_miss_rows.append({
-                                "row_id": int(pair.row_id),
-                                "margin": margin,
-                                "p_star": int(position),
-                                "n_prompt_tokens": len(tokenizer.encode(
-                                    clean_prompt, add_special_tokens=False)),
-                                "predicted": tokenizer.decode([predicted]),
-                                "actual": tokenizer.decode([actual]),
-                                "word": str(word),
-                                "generation_head": str(text)[:80],
-                            })
-                    forwards += 1
+                    suffix, p_star = text, int(position)
+        p_read = readout_index(p_star)
 
-        clean_inputs = tokenizer(clean_prompt, return_tensors="pt").to(device)
+        # One JOINT forward serves the patch cache, the P1 identity, and the
+        # clean readout. Do NOT re-encode a prefix separately to derive the
+        # expected token: BPE prompt tokenisation is not a prefix of the joint
+        # tokenisation (see tests/causal/test_positions.py).
+        clean_inputs = tokenizer(clean_prompt + suffix, return_tensors="pt").to(device)
         _t0 = time.perf_counter()
         with torch.no_grad():
             clean_out = model(**clean_inputs, output_hidden_states=True)
@@ -382,16 +373,46 @@ def run_pilot(
         residual_norms.append(
             float(cache[1][0].norm(dim=-1).median()) if len(cache) > 1 else 1.0)
         forwards += 1
+        joint_logits = clean_out.logits[0]
+
+        # --- P1: the greedy prediction at p*-1 must reproduce the token
+        # actually sitting at p*. A miss means p* is mis-indexed or the
+        # teacher-forcing is wrong.
+        if p_star > 0:
+            ids = clean_inputs["input_ids"][0]
+            row_logits = joint_logits[p_read]
+            predicted = int(row_logits.argmax())
+            actual = int(ids[p_star])
+            hit = predicted == actual
+            p1_hits.append(hit)
+            margin = float(row_logits[predicted] - row_logits[actual])
+            if not hit:
+                # A near-tie means numerical drift (the generations were
+                # produced on an accelerated path); a wide margin means
+                # something structural.
+                p1_margins.append(margin)
+                if margin >= PILOT_THRESHOLDS["P1_decisive_margin"]:
+                    p1_decisive_misses.append(margin)
+                    p1_miss_rows.append({
+                        "row_id": int(pair.row_id),
+                        "margin": margin,
+                        "p_star": int(p_star),
+                        "n_prompt_tokens": n_clean,
+                        "predicted": tokenizer.decode([predicted]),
+                        "actual": tokenizer.decode([actual]),
+                        "word": str(word),
+                        "generation_head": str(suffix)[:80],
+                    })
 
         ld_clean = logit_difference(
-            clean_out.logits[0, p_star].detach().float().cpu().numpy(),
+            joint_logits[p_read].detach().float().cpu().numpy(),
             table, pair.clean_target, pair.donor_target,
         )
 
-        corrupt_inputs = tokenizer(corrupt_prompt, return_tensors="pt").to(device)
+        corrupt_inputs = tokenizer(corrupt_prompt + suffix, return_tensors="pt").to(device)
         _t0 = time.perf_counter()
         with torch.no_grad():
-            corrupt_logits = model(**corrupt_inputs).logits[0, p_star]
+            corrupt_logits = model(**corrupt_inputs).logits[0, p_read]
         fwd_seconds += time.perf_counter() - _t0
         forwards += 1
         ld_corrupt = logit_difference(
@@ -401,37 +422,94 @@ def run_pilot(
         ld_corrupts.append(ld_corrupt)
         denominators.append(abs(ld_clean - ld_corrupt))
 
-        # --- P4: did the corruption move the answer to the donor's target?
-        scores = {w: float(corrupt_logits[ids].max())
-                  for w, ids in table.items() if ids}
+        # --- P4 at the corrected readout: did the corruption move the answer
+        # to the donor's target?
+        scores = {w: float(corrupt_logits[ids_].max())
+                  for w, ids_ in table.items() if ids_}
+        argmax_corrupt = max(scores, key=scores.get) if scores else ""
+        flip = bool(scores) and argmax_corrupt == pair.donor_target
         if scores:
-            flips.append(max(scores, key=scores.get) == pair.donor_target)
+            flips.append(flip)
 
-        clean_logits = clean_out.logits[0, p_star].detach().float().cpu().numpy()
-        clean_scores = {w: float(clean_logits[ids].max())
-                        for w, ids in table.items() if ids}
+        clean_np = joint_logits[p_read].detach().float().cpu().numpy()
+        clean_scores = {w: float(clean_np[ids_].max())
+                        for w, ids_ in table.items() if ids_}
+        argmax_clean = max(clean_scores, key=clean_scores.get) if clean_scores else ""
+        clean_ok = bool(clean_scores) and argmax_clean == pair.clean_target
         if clean_scores:
-            clean_correct.append(
-                max(clean_scores, key=clean_scores.get) == pair.clean_target)
+            clean_correct.append(clean_ok)
+
+        # --- A/B channel: the generating position on the prompt-only run —
+        # the pre-fix instrument, kept side by side so the position defect's
+        # magnitude is measured rather than argued about.
+        if suffix:
+            with torch.no_grad():
+                gclean = model(**tokenizer(clean_prompt, return_tensors="pt")
+                               .to(device)).logits[0, -1]
+                gcorrupt = model(**tokenizer(corrupt_prompt, return_tensors="pt")
+                                 .to(device)).logits[0, -1]
+            forwards += 2
+        else:
+            gclean, gcorrupt = joint_logits[-1], corrupt_logits
+        ld_clean_gen = logit_difference(
+            gclean.detach().float().cpu().numpy(),
+            table, pair.clean_target, pair.donor_target)
+        ld_corrupt_gen = logit_difference(
+            gcorrupt.detach().float().cpu().numpy(),
+            table, pair.clean_target, pair.donor_target)
+        gscores = {w: float(gcorrupt[ids_].max())
+                   for w, ids_ in table.items() if ids_}
+        flip_gen = bool(gscores) and max(gscores, key=gscores.get) == pair.donor_target
+        gclean_scores = {w: float(gclean[ids_].max())
+                         for w, ids_ in table.items() if ids_}
+        clean_ok_gen = (bool(gclean_scores)
+                        and max(gclean_scores, key=gclean_scores.get)
+                        == pair.clean_target)
+        flips_gen.append(flip_gen)
+        clean_correct_gen.append(clean_ok_gen)
+        ld_corrupts_gen.append(ld_corrupt_gen)
 
         shared = dict(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt, readout_table=table,
+            corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=p_star, device=device, ld_clean=ld_clean, ld_corrupt=ld_corrupt,
+            p_star=p_read, device=device, ld_clean=ld_clean, ld_corrupt=ld_corrupt,
         )
         n_positions = int(corrupt_inputs["input_ids"].shape[1])
-        e_full.append(run_patch(
-            sites=all_sites(n_layers=len(cache), n_positions=n_positions), **shared))
-        e_null.append(run_patch(sites=[], **shared))
+        ef = run_patch(
+            sites=all_sites(n_layers=len(cache), n_positions=n_positions), **shared)
+        en = run_patch(sites=[], **shared)
+        e_full.append(ef)
+        e_null.append(en)
         forwards += 2
+
+        donor_ids = set(table.get(pair.donor_target) or [])
+        turn_rows.append({
+            "row_id": int(pair.row_id), "donor_row_id": int(pair.donor_row_id),
+            "p_star": int(p_star), "p_read": int(p_read),
+            "word_first": bool(word_first),
+            "ld_clean": float(ld_clean), "ld_corrupt": float(ld_corrupt),
+            "flip": bool(flip), "clean_correct": bool(clean_ok),
+            "argmax_clean": argmax_clean, "argmax_corrupt": argmax_corrupt,
+            "ld_clean_gen": float(ld_clean_gen),
+            "ld_corrupt_gen": float(ld_corrupt_gen),
+            "flip_gen": bool(flip_gen), "clean_correct_gen": bool(clean_ok_gen),
+            "e_full": float(ef), "e_null": float(en),
+            "n_donor_targets": len(list(by_id.loc[pair.donor_row_id, "targets"])
+                                   if pair.donor_row_id in by_id.index else []),
+            "first_token_collision": bool(any(
+                w != pair.donor_target and (set(ids_) & donor_ids)
+                for w, ids_ in table.items() if ids_)),
+            "n_prompt_tokens": int(n_clean),
+            "n_joint_tokens": int(n_positions),
+        })
 
         # --- P5: attribution against a small set of real patches
         grid = attribution_scan(
             model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt, readout_table=table,
+            corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=p_star, device=device,
+            p_star=p_read, device=device,
         )
         # Stratified: the screen's own top picks PLUS random cells. A
         # random-only sample is range-restricted -- nearly every cell is null,
@@ -528,6 +606,14 @@ def run_pilot(
         "P3": float(np.nanmedian(e_null)) if e_null else 1.0,
         "P4_flip": float(np.mean(flips)) if flips else 0.0,
         "P4_sign": float(np.mean(np.array(ld_corrupts) < 0)) if ld_corrupts else 0.0,
+        # A/B channel: the same quantities read at the generating position on
+        # the prompt-only run (the pre-fix instrument). Diagnostics, not gates.
+        "P4_flip_gen": float(np.mean(flips_gen)) if flips_gen else 0.0,
+        "P4_sign_gen": (float(np.mean(np.array(ld_corrupts_gen) < 0))
+                        if ld_corrupts_gen else 0.0),
+        "P4_clean_accuracy_gen": (float(np.mean(clean_correct_gen))
+                                  if clean_correct_gen else 0.0),
+        "n_p_star_resolved": int(sum(1 for r in turn_rows if r["p_star"] > 0)),
         "P5_rho": rho,
         "P5_fnr": fnr,
         "P5_n_high_effect": n_high,
@@ -556,6 +642,11 @@ def run_pilot(
             base_dir, f"{prefix}_causal_pilot_{mode}_p1_misses.csv")
         pd.DataFrame(p1_miss_rows).to_csv(miss_path, index=False)
         print(f"  {len(p1_miss_rows)} decisive P1 misses written to {miss_path}")
+
+    turns_path = os.path.join(
+        base_dir, f"{prefix}_causal_pilot_turns_{mode}.csv")
+    pd.DataFrame(turn_rows).to_csv(turns_path, index=False)
+    print(f"  per-turn pilot rows written to {turns_path}")
 
     report = pilot_report(results)
     report.to_csv(os.path.join(base_dir, f"{prefix}_causal_pilot_{mode}.csv"), index=False)

@@ -490,3 +490,61 @@ def test_p6_alpha_is_norm_relative():
     assert "residual_scale" in src
     assert "norm=residual_scale" in src
     assert "norm=1.0" not in src, "unit-norm steering direction still present"
+
+
+# --- corrected measurement geometry (2026-07-30): p*, per-turn persistence ---
+
+def _run_tiny_pilot(tiny, tmp_path, gen_rows, mode="no_social"):
+    from codenames.causal.pilot import run_pilot
+    model, tok = tiny
+    df, _ = _pilot_fixtures(tmp_path)
+    gen = tmp_path / "gen_scaffolded.csv"
+    pd.DataFrame(gen_rows).to_csv(gen, index=False)
+    return run_pilot(
+        model=model, tokenizer=tok, df_sample=df, generation_csv=str(gen),
+        base_dir=str(tmp_path), prefix="tiny", mode=mode,
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, device="cpu", seed=2026,
+    )
+
+
+_SCAFFOLDED = [
+    {"row_id": 1, "generated_text": "the answer is sea", "generated_word": "sea"},
+    {"row_id": 2, "generated_text": "the answer is moon", "generated_word": "moon"},
+]
+
+
+def test_pilot_persists_per_turn_rows(tiny, tmp_path):
+    """The first pilot reduced everything to scalars in memory; per-turn rows
+    are what make a gate failure diagnosable without a new GPU run."""
+    _run_tiny_pilot(tiny, tmp_path, _SCAFFOLDED)
+    turns = pd.read_csv(tmp_path / "tiny_causal_pilot_turns_no_social.csv")
+    required = {
+        "row_id", "donor_row_id", "p_star", "p_read", "word_first",
+        "ld_clean", "ld_corrupt", "flip", "clean_correct",
+        "ld_clean_gen", "ld_corrupt_gen", "flip_gen", "clean_correct_gen",
+        "e_full", "e_null", "n_donor_targets", "first_token_collision",
+    }
+    assert required <= set(turns.columns)
+    resolved = turns[turns.p_star > 0]
+    assert len(resolved) > 0
+    assert (resolved["p_read"] == resolved["p_star"] - 1).all()
+
+
+def test_pilot_gates_on_the_emitting_position_and_records_the_gen_channel(
+        tiny, tmp_path):
+    """The gated P4 numbers come from the p*-1 readout; the generating-position
+    channel is kept side by side as the A/B that quantifies the old defect."""
+    _, results = _run_tiny_pilot(tiny, tmp_path, _SCAFFOLDED)
+    assert "P4_flip_gen" in results
+    assert "P4_clean_accuracy_gen" in results
+    turns = pd.read_csv(tmp_path / "tiny_causal_pilot_turns_no_social.csv")
+    assert results["P4_flip"] == pytest.approx(turns["flip"].mean())
+    assert results["P4_flip_gen"] == pytest.approx(turns["flip_gen"].mean())
+
+
+def test_pilot_warns_when_not_drawn_from_with_social(tiny, tmp_path, capsys):
+    """§12.5: the pilot draws from with_social so the confirmatory no_social
+    sample stays untouched. Running it on no_social must be loud."""
+    _run_tiny_pilot(tiny, tmp_path, _SCAFFOLDED, mode="no_social")
+    assert "with_social" in capsys.readouterr().out

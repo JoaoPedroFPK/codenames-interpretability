@@ -289,3 +289,43 @@ def test_scan_per_layer_returns_one_locus_per_depth(tiny):
     grid, loci = run_scan_stage(**_common(tiny), per_layer=True)
     assert len(loci) == grid.shape[0]
     assert sorted(loci["layer"]) == list(range(grid.shape[0]))
+
+
+# --- readout index: the estimand reads at p*-1, never at p* ----------------
+
+def test_scan_reads_logits_at_the_emitting_position(tiny, tmp_path, monkeypatch):
+    """With a resolved p*, every readout must use p*-1 (the position whose
+    next-token distribution emits the answer). Reading at p* conditions on
+    the answer already having been emitted."""
+    import codenames.causal.stages as stages
+    from codenames.causal.positions import answer_position
+    from codenames.prompts import build_prompt
+
+    model, tok = tiny
+    text = "sea is the answer"
+    gen_path = tmp_path / "gen.csv"
+    pd.DataFrame([
+        {"row_id": 1, "generated_text": text, "generated_word": "sea"},
+        {"row_id": 2, "generated_text": "moon", "generated_word": "moon"},
+    ]).to_csv(gen_path, index=False)
+
+    captured = []
+    real_scan = stages.attribution_scan
+
+    def spy(**kwargs):
+        captured.append(kwargs["p_star"])
+        cache = kwargs["clean_cache"]
+        return np.zeros((len(cache), cache[0].shape[1]))
+
+    monkeypatch.setattr(stages, "attribution_scan", spy)
+    run_scan_stage(**_common(tiny), generation_csv=str(gen_path))
+    assert captured, "attribution_scan was never called"
+
+    row = _frame().iloc[0]
+    prompt, _ = build_prompt(
+        hint=str(row["output"]), candidates=list(row["candidates"]),
+        giver_features={}, use_social_context=False, tokenizer=tok,
+        chat_template_strategy="raw")
+    p_star = answer_position(tok, prompt, text, "sea")
+    assert p_star is not None and p_star > 0
+    assert captured[0] == p_star - 1

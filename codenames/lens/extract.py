@@ -45,7 +45,7 @@ import torch
 from tqdm.auto import tqdm
 
 from .. import checkpoint
-from ..causal.positions import answer_position, is_word_first
+from ..causal.positions import answer_position, is_word_first, readout_index
 from ..contract import Contract
 from ..data import GIVER_COLS, extract_giver_features
 from ..prompts import build_prompt
@@ -152,7 +152,8 @@ def _dump_answer_position(
     """
     record = {
         "board_idx": board_idx, "row_id": row_id,
-        "p_star": -1, "p_star_missing": True, "word_first": False,
+        "p_star": -1, "p_read": -1, "p_star_missing": True,
+        "word_first": False,
     }
     if generations is None or row_id not in generations.index:
         return record
@@ -165,13 +166,18 @@ def _dump_answer_position(
 
     record["word_first"] = is_word_first(text, word)
     position = answer_position(tokenizer, prompt, text, word)
-    if position is None:
+    if position is None or position <= 0:
         return record
 
     joint = tokenizer(prompt + text, return_tensors="pt").to(device)
     if position >= joint["input_ids"].shape[1]:
         return record
 
+    # The dumped state is at p_read = p*-1 — the position whose output
+    # channel emits the answer. The state AT p* contains the answer token
+    # itself (its layer-0 entry is the token's embedding), so a lens read
+    # there is circular. See causal.positions.readout_index.
+    p_read = readout_index(position)
     with torch.no_grad():
         out = model(
             input_ids=joint["input_ids"],
@@ -180,11 +186,12 @@ def _dump_answer_position(
         )
     for layer in range(num_layers + 1):
         answer_mm[board_idx, layer] = (
-            out.hidden_states[layer][0, position].detach()
+            out.hidden_states[layer][0, p_read].detach()
             .float().cpu().numpy().astype(np.float16))
     del out
 
     record["p_star"] = int(position)
+    record["p_read"] = int(p_read)
     record["p_star_missing"] = False
     return record
 

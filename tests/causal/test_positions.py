@@ -186,3 +186,17 @@ def test_offsets_are_used_rather_than_decoded_piece_lengths():
     spans = tok(prompt + text, return_offsets_mapping=True)["offset_mapping"]
     start, end = spans[p]
     assert (prompt + text)[start:end] == "MOON"
+
+
+def test_readout_index_is_the_position_that_emits_p_star():
+    """p* is the answer token's own index; the causal readout — the next-token
+    distribution that produces the answer, and the residual stream a lens
+    decodes — lives one position EARLIER. Reading at p* is circular: the
+    layer-0 state there is the answer token's own embedding."""
+    from codenames.causal.positions import readout_index
+
+    assert readout_index(7) == 6
+    assert readout_index(1) == 0
+    assert readout_index(-1) == -1   # unresolved -> generating position
+    assert readout_index(0) == -1
+    assert readout_index(None) == -1

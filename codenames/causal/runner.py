@@ -63,10 +63,32 @@ def _load_model(model_key: str):
     return _resolve_loader(model_key)()
 
 
-def _sample(dataset: str, sample_size: Optional[int], seed: int) -> pd.DataFrame:
+# Default pilot draw size (§12.5); the confirmatory stages exclude exactly
+# this seeded draw so no pilot turn re-enters the evidence sample.
+PILOT_SAMPLE_SIZE = 150
+
+
+def _sample(dataset: str, sample_size: Optional[int], seed: int,
+            exclude_pilot_n: int = 0) -> pd.DataFrame:
+    """Seeded draw; with ``exclude_pilot_n`` the pilot's own seeded draw is
+    removed first (§12.5: "the n = 1,500 draw excludes every pilot turn").
+
+    Both draws use the same seed, so without exclusion the pilot sample is a
+    strict subset of the confirmatory sample — verified on the real corpus
+    (all 150 pilot turns were inside the 1,500-turn draw).
+    """
     from ..data import load_dataset
 
     df = load_dataset(dataset)
+    if exclude_pilot_n > 0:
+        pilot_ids = set(
+            df.sample(n=min(exclude_pilot_n, len(df)), random_state=seed)
+            ["row_id"].astype(int))
+        df = df[~df["row_id"].astype(int).isin(pilot_ids)]
+        if df.empty:
+            raise ValueError(
+                f"excluding the {len(pilot_ids)}-turn pilot draw removed every "
+                "turn; for smoke runs on tiny datasets pass --pilot-n 0")
     contract = dataclasses.replace(
         CONTRACT_V1,
         sample_size=len(df) if sample_size is None else min(sample_size, len(df)),
@@ -91,7 +113,8 @@ def cmd_extract(args) -> int:
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
     model, tokenizer, meta = _load_model(args.model)
-    df = _sample(args.dataset, args.sample_size, args.seed)
+    df = _sample(args.dataset, args.sample_size, args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
 
     pair_table = build_pair_table(
         df, _hint_token_counts(tokenizer, df), seed=args.seed, match_length=True
@@ -141,7 +164,8 @@ def cmd_scan(args) -> int:
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
     model, tokenizer, meta = _load_model(args.model)
-    df = _sample(args.dataset, getattr(args, "sample_size", None), args.seed)
+    df = _sample(args.dataset, getattr(args, "sample_size", None), args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
 
     grid, loci = run_scan_stage(
         model=model, tokenizer=tokenizer, df_sample=df,
@@ -171,7 +195,8 @@ def cmd_patch(args) -> int:
     loci = pd.read_csv(loci_path)
 
     model, tokenizer, meta = _load_model(args.model)
-    df = _sample(args.dataset, args.sample_size, args.seed)
+    df = _sample(args.dataset, args.sample_size, args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
     widths = tuple(int(w) for w in str(args.window_widths).split(",") if w.strip())
 
     effects = run_patch_stage(
@@ -196,7 +221,8 @@ def cmd_steer(args) -> int:
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
     model, tokenizer, meta = _load_model(args.model)
-    df = _sample(args.dataset, args.sample_size, args.seed)
+    df = _sample(args.dataset, args.sample_size, args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
     alphas = tuple(float(a) for a in str(args.alphas).split(",") if a.strip())
 
     out = run_steer_stage(
@@ -219,7 +245,8 @@ def cmd_pilot(args) -> int:
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
     model, tokenizer, meta = _load_model(args.model)
-    df = _sample(args.dataset, args.sample_size, args.seed)
+    df = _sample(args.dataset, args.sample_size, args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
 
     if getattr(args, "no_generations", False):
         # Explicit opt-out only (random-init null). P1 is reported as n/a.

@@ -20,6 +20,28 @@ from typing import Optional
 _STRIP = " \t\n\r\"'`*-–—:."
 
 
+def readout_index(p_star: Optional[int]) -> int:
+    """Logits/hidden-state index that EMITS the token sitting at ``p_star``.
+
+    ``p*`` is the answer token's own index (see ``answer_position``); the
+    causal readout — the next-token distribution that produces the answer,
+    and the residual stream a lens decodes — lives one position EARLIER. In a
+    causal decoder the state at position ``i`` already contains token ``i``:
+    at ``p*`` the layer-0 residual stream IS the answer token's embedding, so
+    any readout there is circular (a lens "decodes" the answer at every
+    layer) and any logit read there conditions on the answer already having
+    been emitted. Gate check P1 embodies the same convention: it compares the
+    argmax at ``p*-1`` against the token at ``p*``.
+
+    Falls back to ``-1`` (the generating position) when ``p*`` is unresolved
+    — for a word-first turn the two coincide, which is the spec's §5.1
+    equivalence argument.
+    """
+    if p_star is None or p_star <= 0:
+        return -1
+    return int(p_star) - 1
+
+
 def is_word_first(generated_text: Optional[str], generated_word: Optional[str]) -> bool:
     """True when the generation opens with the parsed answer word."""
     if not isinstance(generated_text, str) or not isinstance(generated_word, str):

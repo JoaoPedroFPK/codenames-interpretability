@@ -283,3 +283,38 @@ def test_answer_position_rejects_multiple_conditions(tiny, tmp_path):
             conditions=("no_social", "with_social"),
             device="cpu", dump_answer_position=True, generation_csv=gen,
         )
+
+
+def test_answer_dump_states_are_at_the_emitting_position(tiny, tmp_path):
+    """The dumped state must be hidden[p*-1] — the position whose output
+    channel emits the answer — never hidden[p*], whose layer-0 state IS the
+    answer token's embedding (a lens there decodes the answer trivially)."""
+    import torch
+
+    from codenames.prompts import build_prompt
+
+    model, tok = tiny
+    text = "sea is the answer"
+    gen = _generation_csv(tmp_path, [
+        {"row_id": 0, "generated_text": text, "generated_word": "sea"},
+        {"row_id": 1, "generated_text": "I think moon", "generated_word": "moon"},
+    ])
+    out = _run(tiny, tmp_path, gen)
+    index = pd.read_csv(out["no_social"]["answer_index"]).set_index("row_id")
+    p_star = int(index.loc[0, "p_star"])
+    p_read = int(index.loc[0, "p_read"])
+    assert p_read == p_star - 1
+
+    row = _frame().iloc[0]
+    prompt, _ = build_prompt(
+        hint=str(row["output"]), candidates=list(row["candidates"]),
+        giver_features={}, use_social_context=False, tokenizer=tok,
+        chat_template_strategy="raw")
+    joint = tok(prompt + text, return_tensors="pt")
+    with torch.no_grad():
+        ref = model(**joint, output_hidden_states=True, return_dict=True)
+    arr = np.load(out["no_social"]["answer_hidden"], mmap_mode="r")
+    for layer in (0, model.config.num_hidden_layers):
+        expected = ref.hidden_states[layer][0, p_read].float().numpy() \
+            .astype(np.float16)
+        np.testing.assert_array_equal(np.asarray(arr[0, layer]), expected)

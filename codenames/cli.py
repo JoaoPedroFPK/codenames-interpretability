@@ -1593,6 +1593,10 @@ def _make_causal_extract_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
     p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--pilot-n", type=int, default=150,
+                   help="Size of the seeded pilot draw to EXCLUDE from this "
+                        "confirmatory sample (spec §12.5). Pass 0 only for "
+                        "smoke runs on tiny datasets.")
     p.add_argument("--noise-sigma", type=float, default=3.0,
                    help="Multiples of the embedding component SD (ROME setting).")
     return p
@@ -1611,6 +1615,10 @@ def _make_causal_scan_parser(sp) -> argparse.ArgumentParser:
     _add_causal_common(p)
     p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
     p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--pilot-n", type=int, default=150,
+                   help="Size of the seeded pilot draw to EXCLUDE from this "
+                        "confirmatory sample (spec §12.5). Pass 0 only for "
+                        "smoke runs on tiny datasets.")
     p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
@@ -1642,6 +1650,10 @@ def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
     p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--pilot-n", type=int, default=150,
+                   help="Size of the seeded pilot draw to EXCLUDE from this "
+                        "confirmatory sample (spec §12.5). Pass 0 only for "
+                        "smoke runs on tiny datasets.")
     p.add_argument("--window-widths", default="1,3,5",
                    help="Contiguous layer-band widths; 1 is single-site.")
     p.add_argument("--validation-fraction", type=float, default=0.10,
@@ -1675,6 +1687,10 @@ def _make_causal_steer_parser(sp) -> argparse.ArgumentParser:
                    choices=["from_hint", "hint_only", "generating"])
     p.add_argument("--alphas", default="-8,-4,-2,-1,-0.5,0.5,1,2,4,8")
     p.add_argument("--sample-size", type=int, default=_CONFIRMATORY_N)
+    p.add_argument("--pilot-n", type=int, default=150,
+                   help="Size of the seeded pilot draw to EXCLUDE from this "
+                        "confirmatory sample (spec §12.5). Pass 0 only for "
+                        "smoke runs on tiny datasets.")
     return p
 
 

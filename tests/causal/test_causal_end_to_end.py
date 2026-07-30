@@ -107,7 +107,8 @@ def test_scan_then_patch_then_analyze(wired, dataset, tmp_path):
     out = tmp_path / "causal"
     out.mkdir()
     common = ["--model", "mistral", "--output-dir", str(out),
-              "--dataset", dataset, "--condition", "no_social"]
+              "--dataset", dataset, "--condition", "no_social",
+              "--pilot-n", "0"]   # 6-row fixture: the §12.5 exclusion would empty it
 
     assert runner.cmd_scan(_args(["causal-scan", *common, "--per-layer"])) == 0
     grid = np.load(out / "mistral_causal_scan_counterfactual_no_social.npy")
@@ -139,7 +140,7 @@ def test_the_chain_uses_p_star_when_generations_are_present(wired, dataset, tmp_
 
     n = len(load_dataset(dataset))
     common = ["--model", "mistral", "--dataset", dataset,
-              "--condition", "no_social", "--per-layer"]
+              "--condition", "no_social", "--per-layer", "--pilot-n", "0"]
 
     bare = tmp_path / "bare"
     bare.mkdir()
@@ -163,7 +164,8 @@ def test_patch_resume_is_byte_identical_through_the_cli(wired, dataset, tmp_path
     out = tmp_path / "r"
     out.mkdir()
     common = ["--model", "mistral", "--output-dir", str(out),
-              "--dataset", dataset, "--condition", "no_social"]
+              "--dataset", dataset, "--condition", "no_social",
+              "--pilot-n", "0"]   # 6-row fixture: the §12.5 exclusion would empty it
     runner.cmd_scan(_args(["causal-scan", *common, "--per-layer"]))
     patch_args = ["causal-patch", *common, "--window-widths", "1"]
     runner.cmd_patch(_args(patch_args))
@@ -179,3 +181,34 @@ def test_patch_resume_is_byte_identical_through_the_cli(wired, dataset, tmp_path
         first.sort_values(key).reset_index(drop=True),
         resumed.sort_values(key).reset_index(drop=True),
     )
+
+
+# --- §12.5 pilot-turn exclusion (added 2026-07-30) --------------------------
+
+def test_confirmatory_sample_excludes_the_pilot_turns(dataset):
+    """Pilot and confirmatory draws both use seed 2026, so without exclusion
+    every pilot turn is contained in the confirmatory sample — §12.5 forbids
+    exactly that."""
+    pilot = runner._sample(dataset, 2, 2026)
+    confirm = runner._sample(dataset, 3, 2026, exclude_pilot_n=2)
+    assert set(confirm["row_id"]).isdisjoint(set(pilot["row_id"]))
+    assert len(confirm) == 3
+
+
+def test_exclusion_that_empties_the_dataset_fails_loudly(dataset):
+    with pytest.raises(ValueError, match="pilot"):
+        runner._sample(dataset, 3, 2026, exclude_pilot_n=1_000)
+
+
+def test_confirmatory_commands_default_to_the_spec_pilot_n():
+    for cmd in ("causal-extract", "causal-scan", "causal-patch", "causal-steer"):
+        argv = [cmd, "--model", "mistral", "--output-dir", "/tmp/x",
+                "--dataset", "/tmp/d.csv"]
+        if cmd == "causal-steer":
+            argv += ["--layer", "1"]
+        args = build_parser().parse_args(argv)
+        assert args.pilot_n == 150, cmd
+    pilot_args = build_parser().parse_args(["causal-pilot", "--model", "mistral",
+                                            "--output-dir", "/tmp/x",
+                                            "--dataset", "/tmp/d.csv"])
+    assert not hasattr(pilot_args, "pilot_n")

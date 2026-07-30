@@ -24,6 +24,7 @@ from .basis import ROLES, collapse_grid, role_of_each_token, role_positions
 from .metrics import logit_difference
 from .pairs import build_pair_table
 from .patch import all_sites, layer_window, run_patch
+from .positions import readout_index
 from .steer import (
     direction_diff_of_means,
     direction_from_unembedding,
@@ -180,13 +181,17 @@ def run_scan_stage(
         clean_prompt = ctx.prompt(pair.row_id, pair.hint)
         corrupt_prompt = ctx.prompt(pair.row_id, pair.donor_hint)
         suffix, p_star = ctx.measurement(pair.row_id, clean_prompt)
-        cache, _, n_positions = ctx.clean_cache(clean_prompt + suffix, p_star)
+        # Readouts sit at p*-1, the position that EMITS the answer token —
+        # reading at p* itself conditions on the answer already being present
+        # (positions.readout_index; corrected 2026-07-30).
+        p_read = readout_index(p_star)
+        cache, _, n_positions = ctx.clean_cache(clean_prompt + suffix, p_read)
         grid = attribution_scan(
             model=model, tokenizer=tokenizer, clean_cache=cache,
             corrupt_prompt=corrupt_prompt + suffix,
             readout_table=ctx.table(pair.row_id),
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=p_star, device=ctx.device,
+            p_star=p_read, device=ctx.device,
         )
         collapsed.append(collapse_grid(grid, ctx.roles(pair, clean_prompt, n_positions)))
 
@@ -294,19 +299,21 @@ def run_patch_stage(
         # §12.3). §5A length-matches the two prompts, so p* is the same index
         # in the clean and corrupted sequences.
         suffix, p_star = ctx.measurement(pair.row_id, clean_prompt)
-        cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt + suffix, p_star)
+        # p*-1 emits the answer token; p* already contains it (readout_index).
+        p_read = readout_index(p_star)
+        cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt + suffix, p_read)
         table = ctx.table(pair.row_id)
 
         ld_clean = logit_difference(clean_logits, table,
                                     pair.clean_target, pair.donor_target)
         ld_corrupt = logit_difference(
-            ctx.corrupt_logits(corrupt_prompt + suffix, p_star), table,
+            ctx.corrupt_logits(corrupt_prompt + suffix, p_read), table,
             pair.clean_target, pair.donor_target)
         shared = dict(
             model=model, tokenizer=tokenizer, clean_cache=cache,
             corrupt_prompt=corrupt_prompt + suffix, readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
-            p_star=p_star, device=ctx.device,
+            p_star=p_read, device=ctx.device,
             ld_clean=ld_clean, ld_corrupt=ld_corrupt,
         )
 
