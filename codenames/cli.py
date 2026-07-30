@@ -12,7 +12,8 @@ Subcommands:
 - ``compare``:    reference path vs accelerated path, with per-column deltas
 - ``visualize``:  per-board heatmap / projection figures
 - ``aggregate``:  cross-model metric tables + publication figure set
-- ``lens-extract``: generating-position hidden-state dump (GPU; docs/specs/lens_spec.md)
+- ``lens-extract``: position-level hidden-state dump — generating position,
+  p* (primary), candidate spans (GPU; docs/specs/lens_spec.md §5)
 - ``lens-tune``:    tuned-lens translator training (GPU)
 - ``lens-apply``:   raw/tuned candidate scoring from the dump (offline)
 - ``lens-analyze``: pre-registered trajectory analysis + overlay figures
@@ -996,11 +997,15 @@ def _lens_resolve_contract(args, df) -> "object":
 def _make_lens_extract_parser(sp) -> argparse.ArgumentParser:
     p = sp.add_parser(
         "lens-extract",
-        help="Dump per-layer hidden states at the generating position (GPU).",
+        help="Dump per-layer hidden states at the generating position, "
+             "p*, and candidate spans (GPU).",
         description=(
             "One forward pass per board (canonical ordering only). Writes a "
             "fp16 memmap [N, layers+1, d], an index CSV, and the model's "
-            "readout weights. Resumable. docs/specs/lens_spec.md §5."
+            "readout weights; --dump-answer-position adds the p* dump "
+            "(the PRIMARY readout position, lens_spec.md §5.1) and "
+            "--candidate-span-csv adds the subsample-scoped candidate-span "
+            "dump. Resumable. docs/specs/lens_spec.md §5."
         ),
     )
     p.add_argument("--model", required=True, choices=list(_LENS_MODELS))
@@ -1019,6 +1024,18 @@ def _make_lens_extract_parser(sp) -> argparse.ArgumentParser:
                    help="Manifest dir (default: <output-dir>/checkpoints).")
     p.add_argument("--flash-attn", action="store_true",
                    help="Load trained models with flash_attention_2.")
+    p.add_argument("--dump-answer-position", action="store_true",
+                   help="Also dump per-layer states at the answer position "
+                        "p* (primary readout position, lens_spec.md §5.1). "
+                        "Requires --generation-csv and a single condition.")
+    p.add_argument("--generation-csv", default=None,
+                   help="Generation CSV for the SAME condition being "
+                        "extracted, e.g. {prefix}_generation_no_social.csv.")
+    p.add_argument("--candidate-span-csv", default=None,
+                   help="CSV with a row_id column (e.g. the causal pairs "
+                        "table {prefix}_causal_pairs_{cond}.csv) scoping the "
+                        "candidate-span dump to the causal subsample "
+                        "(causal_spec.md §12.4).")
     return p
 
 
@@ -1108,6 +1125,16 @@ def _cmd_lens_extract(args: argparse.Namespace) -> int:
                              seed=contract.random_seed)
     conditions = tuple(c.strip() for c in args.conditions.split(",") if c.strip())
 
+    candidate_span_row_ids = None
+    if args.candidate_span_csv:
+        import pandas as pd
+
+        candidate_span_row_ids = set(
+            pd.read_csv(args.candidate_span_csv)["row_id"].astype(int))
+        print(f"Candidate-span dump scoped to "
+              f"{len(candidate_span_row_ids)} row_ids "
+              f"({args.candidate_span_csv})")
+
     run_lens_extraction(
         model=model,
         tokenizer=tokenizer,
@@ -1122,6 +1149,9 @@ def _cmd_lens_extract(args: argparse.Namespace) -> int:
         device=meta["device"],
         resume=args.resume,
         checkpoint_dir=args.checkpoint_dir,
+        dump_answer_position=args.dump_answer_position,
+        generation_csv=args.generation_csv,
+        candidate_span_row_ids=candidate_span_row_ids,
     )
     return 0
 

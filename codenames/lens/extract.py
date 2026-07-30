@@ -3,9 +3,11 @@
 One forward pass per board (canonical candidate ordering only — the lens
 study needs no shuffles and no generation). For each board, the per-layer
 hidden states at the GENERATING POSITION (final prompt token) are written
-into a preallocated fp16 memmap; row order equals the seeded board sample
-order used by loop.run_extraction, so lens rows align 1:1 with the thesis
-outputs. Resumable via the same manifest machinery as the main loop
+into a preallocated fp16 memmap; rows follow this function's own seeded
+draw over the ``df`` it receives, so joins against other artifacts must go
+through ``row_id``, never positional order (the CLI hands in an already
+sampled frame, which permutes absolute order relative to the thesis
+outputs). Resumable via the same manifest machinery as the main loop
 (prefix suffixed "_lens" so the two never collide).
 
 ANSWER POSITION (added 2026-07-27, lens_spec.md §5.1 / causal_spec.md §4.1).
@@ -20,10 +22,22 @@ be tokenised together, because BPE prompt tokenisation is not a prefix of the
 joint tokenisation (a trailing prompt space merges with the first generated
 word), so p* can never be derived by offsetting from the prompt's own token
 count. The extra pass is ~15k forwards against a ~2.55M budget.
+
+CANDIDATE SPANS (lens_spec.md §5 / causal_spec.md §12.4). With
+``candidate_span_row_ids`` the per-layer states over each candidate's token
+span are additionally written, restricted to the causal subsample (full
+corpus would be ≈169 GB across the two decoders). The spans live in the
+prompt, so they are sliced from the SAME forward pass as the generating
+position — no extra GPU cost. Storage is an incrementally-written,
+``np.load``-compatible npz keyed ``r{row_id}__{candidate}``, each entry
+``(num_layers+1, span_len, hidden)`` fp16, with a companion index CSV.
+Entries carry a fixed zip timestamp so a resumed archive stays
+byte-identical to an uninterrupted one.
 """
 
 import os
-from typing import Dict, Optional, Set, Tuple
+import zipfile
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -35,9 +49,95 @@ from ..causal.positions import answer_position, is_word_first
 from ..contract import Contract
 from ..data import GIVER_COLS, extract_giver_features
 from ..prompts import build_prompt
+from ..spans import find_token_spans
 from .raw import dump_readout_weights
 
 _FLUSH_EVERY = 200  # boards between manifest commits (mirrors shard_boards)
+
+_SPAN_INDEX_COLS = ["board_idx", "row_id", "candidate",
+                    "token_start", "token_end", "ok"]
+
+
+class _SpanZipBuffer:
+    """Incremental npz writer with commit-granularity crash safety.
+
+    Entries buffer in memory and are appended to the archive only at
+    ``flush()`` (called from the manifest commit), so the file on disk is
+    always a valid zip that reflects exactly the committed boards; a crash
+    loses only the uncommitted window, which the resume path recomputes.
+    A fixed entry timestamp keeps the archive deterministic.
+    """
+
+    def __init__(self, path: str, resume: bool):
+        self.path = path
+        self._pending: Dict[str, np.ndarray] = {}
+        self._names: Set[str] = set()
+        if not resume and os.path.exists(path):
+            os.remove(path)
+        if resume and os.path.exists(path):
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    self._names = set(zf.namelist())
+            except zipfile.BadZipFile:
+                raise ValueError(
+                    f"{path} is corrupt (run interrupted before a commit); "
+                    "delete it and re-run this condition without --resume "
+                    "so every board's spans are recomputed.")
+
+    def add(self, name: str, arr: np.ndarray) -> None:
+        entry = name + ".npy"
+        if entry in self._names or entry in self._pending:
+            return  # resume recomputes a window; states are deterministic
+        self._pending[entry] = np.ascontiguousarray(arr)
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        with zipfile.ZipFile(self.path, mode="a",
+                             compression=zipfile.ZIP_STORED,
+                             allowZip64=True) as zf:
+            for entry, arr in self._pending.items():
+                info = zipfile.ZipInfo(entry, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = 0o600 << 16
+                with zf.open(info, "w", force_zip64=True) as f:
+                    np.lib.format.write_array(f, arr, allow_pickle=False)
+        self._names |= set(self._pending)
+        self._pending.clear()
+
+
+def _dump_candidate_spans(
+    *, tokenizer, prompt, candidates, hidden_states, num_layers,
+    row_id, board_idx, writer,
+) -> List[Dict[str, object]]:
+    """Slice each candidate's span states out of the prompt forward pass.
+
+    A candidate whose span cannot be located gets an ``ok=False`` index row
+    and no archive entry, so a missing span is never mistaken for data.
+    """
+    if not getattr(tokenizer, "is_fast", False):
+        raise ValueError(
+            "candidate-span dumping needs a fast tokenizer "
+            "(offset mappings are unavailable on Python tokenizers)")
+    enc = tokenizer(prompt, return_offsets_mapping=True)
+    spans = find_token_spans(
+        prompt, enc["offset_mapping"],
+        {f"cand:{word}": word for word in candidates})
+    rows: List[Dict[str, object]] = []
+    for word in candidates:
+        span = spans.get(f"cand:{word}")
+        rec = {"board_idx": board_idx, "row_id": row_id, "candidate": word,
+               "token_start": -1, "token_end": -1, "ok": False}
+        if span is not None:
+            s, e = span
+            arr = np.stack([
+                hidden_states[layer][0, s:e].detach().float().cpu().numpy()
+                for layer in range(num_layers + 1)
+            ]).astype(np.float16)
+            writer.add(f"r{row_id}__{word}", arr)
+            rec.update(token_start=s, token_end=e, ok=True)
+        rows.append(rec)
+    return rows
 
 
 def _dump_answer_position(
@@ -108,25 +208,25 @@ def run_lens_extraction(
     generation_csv: Optional[str] = None,
     candidate_span_row_ids: Optional[Set[int]] = None,
 ) -> Dict[str, Dict[str, str]]:
-    """Extract per-layer states at the generating position, optionally at p*.
+    """Extract per-layer states at the generating position, optionally at p*
+    and over the candidate spans (causal subsample only).
 
     ``candidate_span_row_ids`` restricts the candidate-span dump to the causal
-    subsample. It is NOT yet implemented: passing a non-None value raises,
-    rather than silently ignoring the request. At full corpus these states are
-    ~169 GB across both decoders (causal_spec.md §12.4), and they serve an
-    explicitly secondary readout that neither the pilot gate nor any primary
-    claim depends on, so the dump is deferred to a wave-2 task.
+    subsample (causal_spec.md §12.4: full corpus would be ~169 GB across both
+    decoders). ``dump_answer_position`` requires a single condition per call,
+    because a generation CSV records one condition's generations.
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    if candidate_span_row_ids is not None:
-        raise NotImplementedError(
-            "candidate-span dumping is deferred (lens_spec.md §5 secondary "
-            "readout); see causal_spec.md §12.4 for the storage rationale"
-        )
     if dump_answer_position and generation_csv is None:
         raise ValueError("dump_answer_position=True requires generation_csv")
+    if dump_answer_position and len(conditions) > 1:
+        raise ValueError(
+            "dump_answer_position requires a single condition per call: a "
+            "generation CSV records one condition's generations, and teacher-"
+            "forcing another condition's prompts with it would silently dump "
+            "wrong states. Run once per condition with its own CSV.")
     generations = None
     if dump_answer_position:
         generations = pd.read_csv(generation_csv).set_index("row_id")
@@ -158,8 +258,7 @@ def run_lens_extraction(
             base_dir, f"{prefix}_lens_index_{mode_name}.csv")
         results[mode_name] = {"hidden": hidden_path, "index": index_path}
 
-        answer_mm = None
-        answer_rows = []
+        answer_path = answer_index_path = None
         if dump_answer_position:
             answer_path = os.path.join(
                 base_dir, f"{prefix}_lens_answer_{mode_name}_f16.npy")
@@ -167,14 +266,20 @@ def run_lens_extraction(
                 base_dir, f"{prefix}_lens_answer_index_{mode_name}.csv")
             results[mode_name]["answer_hidden"] = answer_path
             results[mode_name]["answer_index"] = answer_index_path
-            answer_mm = np.lib.format.open_memmap(
-                answer_path, mode="w+", dtype=np.float16,
-                shape=(n_boards, num_layers + 1, hidden_dim))
-            # Missing p* is NaN, never a silent zero vector.
-            answer_mm[:] = np.nan
+
+        candspan_path = candspan_index_path = None
+        if candidate_span_row_ids is not None:
+            candspan_path = os.path.join(
+                base_dir, f"{prefix}_lens_candspan_{mode_name}_f16.npz")
+            candspan_index_path = os.path.join(
+                base_dir, f"{prefix}_lens_candspan_index_{mode_name}.csv")
+            results[mode_name]["candspan"] = candspan_path
+            results[mode_name]["candspan_index"] = candspan_index_path
 
         boards_done = 0
         index_rows = []
+        answer_rows = []
+        span_rows = []
         if resume:
             man = checkpoint.read_manifest(ckpt_dir, lens_prefix, mode_name)
             if man is not None:
@@ -186,10 +291,19 @@ def run_lens_extraction(
                 if os.path.exists(index_path):
                     index_rows = pd.read_csv(index_path) \
                         .to_dict("records")[:boards_done]
+                if answer_index_path and os.path.exists(answer_index_path):
+                    answer_rows = pd.read_csv(answer_index_path) \
+                        .to_dict("records")[:boards_done]
+                if candspan_index_path and os.path.exists(candspan_index_path):
+                    span_rows = [
+                        r for r in pd.read_csv(candspan_index_path)
+                                     .to_dict("records")
+                        if int(r["board_idx"]) < boards_done]
         else:
             checkpoint.remove_manifest(ckpt_dir, lens_prefix, mode_name)
 
-        if resume and os.path.exists(hidden_path) and boards_done > 0:
+        resuming = resume and os.path.exists(hidden_path) and boards_done > 0
+        if resuming:
             mm = np.lib.format.open_memmap(hidden_path, mode="r+")
             if mm.shape != (n_boards, num_layers + 1, hidden_dim):
                 raise ValueError(
@@ -201,9 +315,44 @@ def run_lens_extraction(
         else:
             boards_done = 0
             index_rows = []
+            answer_rows = []
+            span_rows = []
             mm = np.lib.format.open_memmap(
                 hidden_path, mode="w+", dtype=np.float16,
                 shape=(n_boards, num_layers + 1, hidden_dim))
+
+        answer_mm = None
+        if dump_answer_position:
+            if resuming:
+                if not os.path.exists(answer_path):
+                    raise ValueError(
+                        f"Resuming at board {boards_done} but {answer_path} "
+                        "does not exist: the p* dump cannot be retrofitted "
+                        "onto a run started without it. Re-run without "
+                        "--resume.")
+                answer_mm = np.lib.format.open_memmap(answer_path, mode="r+")
+                if answer_mm.shape != (n_boards, num_layers + 1, hidden_dim):
+                    raise ValueError(
+                        f"Existing p* dump {answer_path} has shape "
+                        f"{answer_mm.shape}, expected "
+                        f"{(n_boards, num_layers + 1, hidden_dim)}; refusing "
+                        "to resume into a mismatched file.")
+            else:
+                answer_mm = np.lib.format.open_memmap(
+                    answer_path, mode="w+", dtype=np.float16,
+                    shape=(n_boards, num_layers + 1, hidden_dim))
+                # Missing p* is NaN, never a silent zero vector.
+                answer_mm[:] = np.nan
+
+        span_writer = None
+        if candidate_span_row_ids is not None:
+            if resuming and not os.path.exists(candspan_path):
+                raise ValueError(
+                    f"Resuming at board {boards_done} but {candspan_path} "
+                    "does not exist: the candidate-span dump cannot be "
+                    "retrofitted onto a run started without it. Re-run "
+                    "without --resume.")
+            span_writer = _SpanZipBuffer(candspan_path, resume=resuming)
 
         def _commit(done):
             pd.DataFrame(index_rows).to_csv(index_path, index=False)
@@ -211,6 +360,10 @@ def run_lens_extraction(
             if answer_mm is not None:
                 pd.DataFrame(answer_rows).to_csv(answer_index_path, index=False)
                 answer_mm.flush()
+            if span_writer is not None:
+                span_writer.flush()
+                pd.DataFrame(span_rows, columns=_SPAN_INDEX_COLS) \
+                    .to_csv(candspan_index_path, index=False)
             checkpoint.write_manifest(
                 ckpt_dir, lens_prefix, mode_name,
                 n_boards=n_boards, boards_done=done,
@@ -249,6 +402,14 @@ def run_lens_extraction(
                     "prompt_token_count": int(inputs["input_ids"].shape[1]),
                     "ok": True, "error": "",
                 })
+                if (span_writer is not None
+                        and row_id in candidate_span_row_ids):
+                    span_rows.extend(_dump_candidate_spans(
+                        tokenizer=tokenizer, prompt=prompt,
+                        candidates=list(row["candidates"]),
+                        hidden_states=out.hidden_states,
+                        num_layers=num_layers, row_id=row_id,
+                        board_idx=board_idx, writer=span_writer))
                 del out
 
                 if answer_mm is not None:

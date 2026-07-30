@@ -122,15 +122,164 @@ def test_p_star_is_not_derived_from_prompt_token_count(tiny, tmp_path):
     assert index.loc[0, "p_star"] < lens_index.loc[0, "prompt_token_count"]
 
 
-def test_candidate_span_request_raises_rather_than_silently_ignoring(tiny, tmp_path):
-    """A deferred feature must fail loudly, not accept-and-ignore."""
+def _run_candspan(tiny, tmp_path, row_ids):
     model, tok = tiny
     contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
-    with pytest.raises(NotImplementedError, match="candidate-span"):
+    return run_lens_extraction(
+        model=model, tokenizer=tok, df=_frame(), base_dir=str(tmp_path),
+        prefix="tiny", contract=contract, chat_template_strategy="raw",
+        num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, conditions=("no_social",),
+        device="cpu", candidate_span_row_ids=row_ids,
+    )
+
+
+def test_candspan_npz_written_only_for_requested_rows(tiny, tmp_path):
+    """causal_spec.md §12.4: the dump is scoped to the causal subsample."""
+    out = _run_candspan(tiny, tmp_path, {1})
+    with np.load(out["no_social"]["candspan"]) as npz:
+        keys = sorted(npz.files)
+    assert keys == ["r1__moon", "r1__sea", "r1__ship"]
+    index = pd.read_csv(out["no_social"]["candspan_index"])
+    assert set(index["row_id"]) == {1}
+    assert sorted(index["candidate"]) == ["moon", "sea", "ship"]
+    assert index["ok"].all()
+
+
+def test_candspan_states_match_a_fresh_forward(tiny, tmp_path):
+    """Dumped span states must be the model's own hidden states, fp16-cast."""
+    import torch
+
+    from codenames.prompts import build_prompt
+
+    model, tok = tiny
+    out = _run_candspan(tiny, tmp_path, {1})
+    index = pd.read_csv(out["no_social"]["candspan_index"]).set_index("candidate")
+    row = _frame().iloc[1]
+    prompt, _ = build_prompt(
+        hint=str(row["output"]), candidates=list(row["candidates"]),
+        giver_features={}, use_social_context=False, tokenizer=tok,
+        chat_template_strategy="raw")
+    inputs = tok(prompt, return_tensors="pt")
+    with torch.no_grad():
+        ref = model(**inputs, output_hidden_states=True, return_dict=True)
+    s = int(index.loc["sea", "token_start"])
+    e = int(index.loc["sea", "token_end"])
+    expected = np.stack([
+        ref.hidden_states[layer][0, s:e].float().numpy().astype(np.float16)
+        for layer in range(model.config.num_hidden_layers + 1)
+    ])
+    with np.load(out["no_social"]["candspan"]) as npz:
+        got = npz["r1__sea"]
+    assert got.dtype == np.float16
+    assert got.shape == expected.shape          # (L+1, span_len, hidden)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_candspan_token_bounds_decode_to_the_candidate(tiny, tmp_path):
+    from codenames.prompts import build_prompt
+
+    _, tok = tiny
+    out = _run_candspan(tiny, tmp_path, {0})
+    index = pd.read_csv(out["no_social"]["candspan_index"]).set_index("candidate")
+    row = _frame().iloc[0]
+    prompt, _ = build_prompt(
+        hint=str(row["output"]), candidates=list(row["candidates"]),
+        giver_features={}, use_social_context=False, tokenizer=tok,
+        chat_template_strategy="raw")
+    ids = tok(prompt)["input_ids"]
+    for word in row["candidates"]:
+        s = int(index.loc[word, "token_start"])
+        e = int(index.loc[word, "token_end"])
+        assert word in tok.decode(ids[s:e]).lower()
+
+
+def test_main_dump_unchanged_by_candspan_extension(tiny, tmp_path):
+    """The candidate-span addition must not perturb the existing lens dump."""
+    model, tok = tiny
+    contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
+    base = dict(
+        model=model, tokenizer=tok, df=_frame(), prefix="tiny", contract=contract,
+        chat_template_strategy="raw", num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, conditions=("no_social",), device="cpu",
+    )
+    without = run_lens_extraction(base_dir=str(tmp_path / "a"), **base)
+    with_spans = run_lens_extraction(
+        base_dir=str(tmp_path / "b"), candidate_span_row_ids={0, 1}, **base)
+    np.testing.assert_array_equal(
+        np.load(without["no_social"]["hidden"]),
+        np.load(with_spans["no_social"]["hidden"]))
+
+
+def _rewind_manifest(tmp_path, boards_done):
+    from codenames import checkpoint
+    checkpoint.write_manifest(
+        str(tmp_path / "checkpoints"), "tiny_lens", "no_social",
+        n_boards=2, boards_done=boards_done, ckpt_committed=0, complete=False)
+
+
+def test_answer_dump_survives_resume(tiny, tmp_path):
+    """Resume must not wipe already-computed p* states (w+ reopen bug)."""
+    gen = _generation_csv(tmp_path, [
+        {"row_id": 0, "generated_text": "sea is the answer", "generated_word": "sea"},
+        {"row_id": 1, "generated_text": "I think moon", "generated_word": "moon"},
+    ])
+    out1 = _run(tiny, tmp_path, gen)
+    full = np.array(np.load(out1["no_social"]["answer_hidden"]))
+    assert not np.isnan(full).all()
+
+    _rewind_manifest(tmp_path, 1)
+    model, tok = tiny
+    contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
+    out2 = run_lens_extraction(
+        model=model, tokenizer=tok, df=_frame(), base_dir=str(tmp_path),
+        prefix="tiny", contract=contract, chat_template_strategy="raw",
+        num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, conditions=("no_social",),
+        device="cpu", dump_answer_position=True, generation_csv=gen,
+        resume=True,
+    )
+    resumed = np.array(np.load(out2["no_social"]["answer_hidden"]))
+    np.testing.assert_array_equal(resumed, full)   # board 0 kept, board 1 redone
+    index = pd.read_csv(out2["no_social"]["answer_index"])
+    assert sorted(index["row_id"]) == [0, 1]       # index keeps both rows
+
+
+def test_candspan_dump_survives_resume(tiny, tmp_path):
+    out1 = _run_candspan(tiny, tmp_path, {0, 1})
+    with np.load(out1["no_social"]["candspan"]) as npz:
+        keys1 = sorted(npz.files)
+
+    _rewind_manifest(tmp_path, 1)
+    model, tok = tiny
+    contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
+    out2 = run_lens_extraction(
+        model=model, tokenizer=tok, df=_frame(), base_dir=str(tmp_path),
+        prefix="tiny", contract=contract, chat_template_strategy="raw",
+        num_layers=model.config.num_hidden_layers,
+        hidden_dim=model.config.hidden_size, conditions=("no_social",),
+        device="cpu", candidate_span_row_ids={0, 1}, resume=True,
+    )
+    with np.load(out2["no_social"]["candspan"]) as npz:
+        assert sorted(npz.files) == keys1          # nothing lost, no duplicates
+    index = pd.read_csv(out2["no_social"]["candspan_index"])
+    assert sorted(set(index["row_id"])) == [0, 1]
+
+
+def test_answer_position_rejects_multiple_conditions(tiny, tmp_path):
+    """One generation CSV belongs to one condition; teacher-forcing another
+    condition's prompts with it would silently dump wrong states."""
+    model, tok = tiny
+    contract = dataclasses.replace(CONTRACT_V1, sample_size=2)
+    gen = _generation_csv(tmp_path, [
+        {"row_id": 0, "generated_text": "sea", "generated_word": "sea"},
+    ])
+    with pytest.raises(ValueError, match="single condition"):
         run_lens_extraction(
             model=model, tokenizer=tok, df=_frame(), base_dir=str(tmp_path),
             prefix="tiny", contract=contract, chat_template_strategy="raw",
             num_layers=model.config.num_hidden_layers,
-            hidden_dim=model.config.hidden_size, conditions=("no_social",),
-            device="cpu", candidate_span_row_ids={0, 1},
+            hidden_dim=model.config.hidden_size,
+            conditions=("no_social", "with_social"),
+            device="cpu", dump_answer_position=True, generation_csv=gen,
         )
