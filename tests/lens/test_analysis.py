@@ -228,3 +228,43 @@ def test_run_analysis_without_scores_is_graceful(tmp_path):
     out = run_analysis(output_root=str(tmp_path), models=("mistral",),
                        random_model=None, out_dir=str(tmp_path / "an"))
     assert out == {}
+
+
+def _tiny_scores(rows=40):
+    import numpy as np
+    rng = np.random.default_rng(2026)
+    recs = []
+    for row_id in range(rows // 8):
+        for layer in (0, 1):
+            words = [("sea", "target"), ("moon", "black"),
+                     ("ship", "tan"), ("castle", "tan")]
+            scores = rng.standard_normal(4)
+            order = (-scores).argsort().argsort() + 1
+            for (w, wt), s, r in zip(words, scores, order):
+                recs.append({"row_id": row_id, "layer": layer, "word": w,
+                             "word_type": wt, "lens": "raw",
+                             "score": float(s), "rank": int(r)})
+    return pd.DataFrame(recs)
+
+
+def test_run_analysis_answer_channel_reads_answer_scores_and_null_fallback(tmp_path):
+    """channel='answer' reads {m}_lens_scores_answer_{mode}.parquet, writes
+    answer-labelled outputs, and falls back to the null's generating-channel
+    scores (a model with no behaviour has no answer channel)."""
+    import os
+
+    from codenames.lens.analysis import run_analysis
+
+    root = tmp_path
+    for m, label in [("m", "answer_no_social"), ("r", "no_social")]:
+        d = root / f"{m}_outputs"
+        d.mkdir()
+        _tiny_scores().to_parquet(d / f"{m}_lens_scores_{label}.parquet",
+                                  index=False)
+    out = root / "lens_analysis"
+    summary = run_analysis(output_root=str(root), models=("m",),
+                           random_model="r", mode="no_social",
+                           channel="answer", out_dir=str(out), n_boot=20)
+    assert "m" in summary
+    curves = pd.read_csv(out / "lens_curves_answer_no_social.csv")
+    assert set(curves["model"]) == {"m", "r"}

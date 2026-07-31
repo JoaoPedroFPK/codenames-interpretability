@@ -198,31 +198,48 @@ def run_analysis(
     models: Sequence[str] = ("mistral", "qwen"),
     random_model: Optional[str] = "random_qwen",
     mode: str = "no_social",
+    channel: str = "generating",
     out_dir: str = os.path.join("output", "lens_analysis"),
     n_boot: int = 5000,
     seed: int = 2026,
 ) -> Dict[str, Dict]:
     """Orchestrate the full §7 analysis over saved scores parquets.
 
-    Reads {output_root}/{m}_outputs/{m}_lens_scores_{mode}.parquet for each
+    Reads {output_root}/{m}_outputs/{m}_lens_scores_{label}.parquet for each
     model (including the random-init null), the thesis generation CSVs, and
-    the aggregate geometric curve. Writes five CSVs into ``out_dir`` and
-    returns the per-model summary dict.
+    the aggregate geometric curve, where ``label`` is ``{mode}`` for the
+    generating channel and ``answer_{mode}`` for the p_read answer channel
+    (the PRIMARY readout, lens_spec.md §5.1). The random-init null has no
+    generations and therefore no answer channel; on ``channel='answer'`` it
+    falls back to its generating-channel scores, which is sound because the
+    null's flatness claim is channel-independent. Writes five CSVs into
+    ``out_dir`` and returns the per-model summary dict.
     """
     os.makedirs(out_dir, exist_ok=True)
+    label = mode if channel == "generating" else f"answer_{mode}"
     concordance_csv = os.path.join(output_root, "analysis",
                                    "analysis_concordance_by_layer.csv")
 
-    def _scores_path(m):
+    def _scores_path(m, lab=None):
         return os.path.join(output_root, f"{m}_outputs",
-                            f"{m}_lens_scores_{mode}.parquet")
+                            f"{m}_lens_scores_{lab or label}.parquet")
 
     curves_by_model, all_curves, decisions, calibrations, shuffles = \
         {}, [], [], [], []
 
     random_curves = None
-    if random_model is not None and os.path.exists(_scores_path(random_model)):
-        rs = pd.read_parquet(_scores_path(random_model))
+    random_path = None
+    if random_model is not None:
+        random_path = _scores_path(random_model)
+        if not os.path.exists(random_path) and channel == "answer":
+            fallback = _scores_path(random_model, mode)
+            if os.path.exists(fallback):
+                print(f"  [lens-analyze] null '{random_model}' has no answer "
+                      f"channel (no generations); using its generating-"
+                      f"channel scores — flatness is channel-independent.")
+                random_path = fallback
+    if random_path is not None and os.path.exists(random_path):
+        rs = pd.read_parquet(random_path)
         random_curves = layer_curves(rs, n_boot=n_boot, seed=seed)
         curves_by_model[random_model] = random_curves
         all_curves.append(random_curves.assign(model=random_model))
@@ -280,13 +297,13 @@ def run_analysis(
         return summary
 
     pd.concat(all_curves, ignore_index=True).to_csv(
-        os.path.join(out_dir, f"lens_curves_{mode}.csv"), index=False)
+        os.path.join(out_dir, f"lens_curves_{label}.csv"), index=False)
     pd.DataFrame(decisions).to_csv(
-        os.path.join(out_dir, f"lens_decision_table_{mode}.csv"), index=False)
+        os.path.join(out_dir, f"lens_decision_table_{label}.csv"), index=False)
     pd.DataFrame(calibrations).to_csv(
-        os.path.join(out_dir, f"lens_calibration_{mode}.csv"), index=False)
+        os.path.join(out_dir, f"lens_calibration_{label}.csv"), index=False)
     pd.concat(shuffles, ignore_index=True).to_csv(
-        os.path.join(out_dir, f"lens_shuffle_control_{mode}.csv"), index=False)
+        os.path.join(out_dir, f"lens_shuffle_control_{label}.csv"), index=False)
 
     if random_curves is not None:
         deltas = []
@@ -296,7 +313,7 @@ def run_analysis(
                     curves_by_model[m], random_curves).assign(model=m))
         if deltas:
             pd.concat(deltas, ignore_index=True).to_csv(
-                os.path.join(out_dir, f"lens_trained_vs_random_{mode}.csv"),
+                os.path.join(out_dir, f"lens_trained_vs_random_{label}.csv"),
                 index=False)
 
     print(f"  lens analysis written to {out_dir}")

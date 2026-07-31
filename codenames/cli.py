@@ -1105,6 +1105,12 @@ def _make_lens_analyze_parser(sp) -> argparse.ArgumentParser:
                    help="Prefix of the random-init null, or 'none'.")
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
+    p.add_argument("--channel", default="generating",
+                   choices=["generating", "answer"],
+                   help="Which scored channel to analyze: 'answer' = p_read "
+                        "(PRIMARY, lens_spec.md §5.1), 'generating' = "
+                        "secondary/calibration. The random null falls back "
+                        "to its generating scores on the answer channel.")
     p.add_argument("--out-dir", default=os.path.join("output", "lens_analysis"))
     p.add_argument("--figures-dir", default=os.path.join("visualization", "lens"))
     p.add_argument("--n-boot", type=int, default=5000)
@@ -1289,6 +1295,7 @@ def _cmd_lens_analyze(args: argparse.Namespace) -> int:
         models=models,
         random_model=random_model,
         mode=args.condition,
+        channel=args.channel,
         out_dir=args.out_dir,
         n_boot=args.n_boot,
         seed=args.seed,
