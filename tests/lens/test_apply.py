@@ -79,3 +79,13 @@ def test_failed_boards_are_skipped(tmp_path):
     raw = compute_scores(hidden_path, index_path, df, FakeTokenizer(),
                          readout, "raw")
     assert set(raw["row_id"]) == {10}
+
+
+def test_compute_scores_accepts_an_index_frame_and_skips_not_ok(tmp_path):
+    """The answer-channel index arrives as a frame (ok = ~p_star_missing);
+    boards without a resolved p* must be absent, not scored on NaN states."""
+    hidden_path, _, df, readout = _fixture(tmp_path)
+    index = pd.DataFrame({"board_idx": [0, 1], "row_id": [10, 11],
+                          "ok": [True, False]})
+    out = compute_scores(hidden_path, index, df, FakeTokenizer(), readout, "raw")
+    assert set(out["row_id"]) == {10}

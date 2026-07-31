@@ -1080,6 +1080,12 @@ def _make_lens_apply_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--conditions", default="no_social")
     p.add_argument("--lenses", default="raw,tuned",
                    help="Comma-separated subset of: raw,tuned.")
+    p.add_argument("--channel", default="generating",
+                   choices=["generating", "answer"],
+                   help="Which position dump to score: 'answer' = p_read "
+                        "(PRIMARY readout, lens_spec.md §5.1; skips turns "
+                        "without a resolved p*), 'generating' = final prompt "
+                        "token (secondary/calibration channel).")
     return p
 
 
@@ -1230,14 +1236,33 @@ def _cmd_lens_apply(args: argparse.Namespace) -> int:
             lenses = [x for x in lenses if x != "tuned"]
 
     for mode_name in (c.strip() for c in args.conditions.split(",")):
-        hidden = os.path.join(args.output_dir,
-                              f"{prefix}_lens_hidden_{mode_name}_f16.npy")
-        index = os.path.join(args.output_dir,
-                             f"{prefix}_lens_index_{mode_name}.csv")
-        if not os.path.exists(hidden):
-            print(f"  WARNING: no hidden dump for '{mode_name}' "
-                  f"({hidden}); skipping.")
-            continue
+        if args.channel == "answer":
+            import pandas as pd
+
+            hidden = os.path.join(
+                args.output_dir, f"{prefix}_lens_answer_{mode_name}_f16.npy")
+            index_path = os.path.join(
+                args.output_dir, f"{prefix}_lens_answer_index_{mode_name}.csv")
+            if not os.path.exists(hidden):
+                print(f"  WARNING: no answer dump for '{mode_name}' "
+                      f"({hidden}); skipping.")
+                continue
+            index = pd.read_csv(index_path)
+            index["ok"] = ~index["p_star_missing"].astype(bool)
+            n_ok = int(index["ok"].sum())
+            print(f"  answer channel: {n_ok}/{len(index)} boards with a "
+                  f"resolved p*")
+            label = f"answer_{mode_name}"
+        else:
+            hidden = os.path.join(
+                args.output_dir, f"{prefix}_lens_hidden_{mode_name}_f16.npy")
+            index = os.path.join(
+                args.output_dir, f"{prefix}_lens_index_{mode_name}.csv")
+            if not os.path.exists(hidden):
+                print(f"  WARNING: no hidden dump for '{mode_name}' "
+                      f"({hidden}); skipping.")
+                continue
+            label = mode_name
         frames = []
         if "raw" in lenses:
             frames.append(compute_scores(hidden, index, df_sample,
@@ -1247,7 +1272,7 @@ def _cmd_lens_apply(args: argparse.Namespace) -> int:
                                          tokenizer, readout, "tuned",
                                          translators=translators))
         if frames:
-            out = save_scores(frames, args.output_dir, prefix, mode_name)
+            out = save_scores(frames, args.output_dir, prefix, label)
             print(f"  Scores saved: {out}")
     return 0
 

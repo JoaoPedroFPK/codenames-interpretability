@@ -58,3 +58,13 @@ def test_lens_extract_forwards_position_kwargs(tmp_path, monkeypatch):
     assert captured["dump_answer_position"] is True
     assert captured["generation_csv"] == "/tmp/gen.csv"
     assert captured["candidate_span_row_ids"] == {3, 5}
+
+
+def test_lens_apply_channel_flag():
+    base = ["lens-apply", "--model", "qwen", "--dataset", "/tmp/d.csv",
+            "--output-dir", "/tmp/x"]
+    assert build_parser().parse_args(base).channel == "generating"
+    assert build_parser().parse_args(
+        base + ["--channel", "answer"]).channel == "answer"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(base + ["--channel", "bogus"])

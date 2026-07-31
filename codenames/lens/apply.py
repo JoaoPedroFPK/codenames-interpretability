@@ -56,7 +56,11 @@ def compute_scores(
 ) -> pd.DataFrame:
     mm = np.load(hidden_path, mmap_mode="r")
     n_boards, n_states, _ = mm.shape
-    index = pd.read_csv(index_path)
+    # The generating channel hands a CSV path; the answer channel hands a
+    # frame whose ``ok`` is derived from ``p_star_missing`` so boards without
+    # a resolved p* are skipped rather than scored on NaN states.
+    index = (index_path if isinstance(index_path, pd.DataFrame)
+             else pd.read_csv(index_path))
     by_row_id = df_sample.set_index("row_id")
 
     # Per-board candidate token tables + the union of variant ids.
