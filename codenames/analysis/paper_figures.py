@@ -353,7 +353,7 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
                scan_clip: float = 1.5, pooling: str = "mean",
                condition: str = "no_social",
                grids: Optional[Dict[str, tuple]] = None,
-               direction: str = "denoise") -> Path:
+               direction: str = "denoise", layout: str = "both") -> Path:
     """Per model, two panels: (left) the attribution scan over layer x role,
     clipped at ``scan_clip`` (screening only); (right) real-patch effects by
     role with cluster-bootstrap CIs, the two geometric humps as grey bands and
@@ -367,10 +367,22 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
     effects.
     """
     grids = grids or {}
-    plt = _paper_fig((PAPER_W, 2.15 * len(per_model)))
     n = len(per_model)
-    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.15 * n), squeeze=False,
-                             gridspec_kw={"width_ratios": [1.0, 1.6]})
+    if layout == "both":
+        plt = _paper_fig((PAPER_W, 2.15 * n))
+        fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.15 * n), squeeze=False,
+                                 gridspec_kw={"width_ratios": [1.0, 1.6]})
+    else:
+        plt = _paper_fig((PAPER_W, 2.2))
+        fig, row_axes = plt.subplots(1, n, figsize=(PAPER_W, 2.2), squeeze=False,
+                                     sharey=(layout == "curves"))
+        # build a 2-column view so the loop below stays unchanged
+        import matplotlib.pyplot as _plt  # noqa: F401
+        dummy = [_plt.figure().add_subplot(111) for _ in range(n)]
+        if layout == "curves":
+            axes = np.array([[dummy[i], row_axes[0][i]] for i in range(n)], dtype=object)
+        else:
+            axes = np.array([[row_axes[0][i], dummy[i]] for i in range(n)], dtype=object)
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
     letters = iter("abcdefgh")
@@ -447,6 +459,15 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         ax_c.set_title(f"{s['label']}: {title}", fontsize=6, pad=2, loc="right")
         ax_c.legend(fontsize=5, frameon=False, loc="best", ncol=2 if m in grids else 1)
         _letter(ax_c, next(letters))
+    if layout != "both":
+        for d in dummy:
+            plt.close(d.figure)
+        used = axes[:, 1] if layout == "curves" else axes[:, 0]
+        for i, ax in enumerate(used):
+            _letter(ax, "abcdefgh"[i])
+        if layout == "curves":
+            for ax in axes[1:, 1]:
+                ax.set_ylabel("")
     fig.tight_layout()
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -569,6 +590,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--lens-dir", default="output/lens_analysis")
     ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
     ap.add_argument("--panels", default="abcd", help="geometry panels: abcd or ab")
+    ap.add_argument("--layout", default="both", choices=("both", "curves", "scan"),
+                    help="causal figure layout: both (scan+curve per model), curves only, or scan only")
     ap.add_argument("--human-accuracy", type=float, default=None)
     ap.add_argument("--panel-b-models", default=None, help="comma-separated subset for panel (b)")
     ap.add_argument("--emergence", default="mistral=20,qwen=25",
@@ -614,7 +637,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out = fig_causal(per_model,
                          _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
                          emergence, out_path=a.out, pooling=a.pooling, condition=a.condition,
-                         grids=grids, direction=a.grid_direction)
+                         grids=grids, direction=a.grid_direction, layout=a.layout)
         print(f"wrote {out}")
     elif a.fig == "triangulation":
         effects = {}
