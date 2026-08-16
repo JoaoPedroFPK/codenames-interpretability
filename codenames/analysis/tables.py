@@ -36,9 +36,13 @@ MODEL_FAMILY: Dict[str, str] = {
     "random_bert": "bert",
     "t5": "t5",
     "modernbert": "modernbert",
+    # ICLR 2027 additions: base variants (geometry only) + a third decoder.
+    "mistral_base": "mistral",
+    "qwen_base": "qwen",
+    "llama": "llama",
 }
 MODEL_PREFIXES = list(MODEL_FAMILY)
-GENERATION_PREFIXES = ["mistral", "qwen"]  # trained causal models only
+GENERATION_PREFIXES = ["mistral", "qwen", "llama"]  # trained instruct decoders only
 CONDITIONS = ["no_social", "with_social"]
 POOLINGS = ["mean", "max_norm"]
 

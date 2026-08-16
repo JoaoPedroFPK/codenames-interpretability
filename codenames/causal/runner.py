@@ -21,7 +21,8 @@ import pandas as pd
 
 from ..contract import CONTRACT_V1
 
-_PREFIXES = {"mistral": "mistral", "qwen": "qwen", "qwen_random": "random_qwen"}
+_PREFIXES = {"mistral": "mistral", "qwen": "qwen", "qwen_random": "random_qwen",
+             "llama": "llama"}
 
 
 def _prefix(model: str) -> str:

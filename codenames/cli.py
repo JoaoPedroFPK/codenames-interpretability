@@ -49,7 +49,15 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
     "bert_random": ("codenames.models.bert_random", "load_bert_random"),
     "t5":          ("codenames.models.t5",          "load_t5_encoder"),
     "modernbert":  ("codenames.models.modernbert",  "load_modernbert"),
+    # Added for the ICLR 2027 paper: base variants (geometry only) and a
+    # third instruction-tuned decoder.
+    "mistral_base": ("codenames.models.mistral_base", "load_mistral_base"),
+    "qwen_base":    ("codenames.models.qwen_base",    "load_qwen_base"),
+    "llama":        ("codenames.models.llama",        "load_llama_instruct"),
 }
+
+# Trained causal decoders that accept attn_implementation='flash_attention_2'.
+_FLASH_ATTN_MODELS = ("mistral", "qwen", "mistral_base", "qwen_base", "llama")
 
 
 def _resolve_loader(model_name: str) -> Callable:
@@ -375,7 +383,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     # Load the model with FA2 if requested and supported.
-    if acceleration.flash_attention_for_causal and args.model in ("mistral", "qwen"):
+    if acceleration.flash_attention_for_causal and args.model in _FLASH_ATTN_MODELS:
         print(f"Loading model with attn_implementation='flash_attention_2'")
         model, tokenizer, meta = loader(attn_implementation="flash_attention_2")
     else:
@@ -608,7 +616,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
     )
 
-    wants_fa2_reload = args.flash_attn and args.model in ("mistral", "qwen")
+    wants_fa2_reload = args.flash_attn and args.model in _FLASH_ATTN_MODELS
 
     df = load_dataset(args.dataset)
     df_sample = sample_turns(df, n=args.n, seed=CONTRACT_V1.random_seed)
@@ -949,21 +957,26 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 # Registry keys of the causal decoders the lens instrument is defined for.
-_LENS_MODELS = ("mistral", "qwen", "qwen_random")
+_LENS_MODELS = ("mistral", "qwen", "qwen_random", "mistral_base", "qwen_base", "llama")
 # Registry key -> output prefix (matches each loader's metadata["prefix"]).
 _LENS_PREFIXES = {"mistral": "mistral", "qwen": "qwen",
-                  "qwen_random": "random_qwen"}
+                  "qwen_random": "random_qwen", "mistral_base": "mistral_base",
+                  "qwen_base": "qwen_base", "llama": "llama"}
 # Registry key -> HF id whose tokenizer the offline stages load. lens-apply
 # never loads the 7B weights; the random-init decoder shares Qwen's tokenizer.
 _LENS_TOKENIZERS = {
     "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
     "qwen": "Qwen/Qwen2.5-7B-Instruct",
     "qwen_random": "Qwen/Qwen2.5-7B-Instruct",
+    "mistral_base": "mistral-community/Mistral-7B-v0.2",
+    "qwen_base": "Qwen/Qwen2.5-7B",
+    "llama": "meta-llama/Llama-3.1-8B-Instruct",
 }
 # Registry key -> chat template strategy (matches loader metadata; kept here
 # so the offline stages don't need the loader).
 _LENS_CHAT_TEMPLATES = {"mistral": "mistral_inst", "qwen": "chatml",
-                        "qwen_random": "chatml"}
+                        "qwen_random": "chatml", "mistral_base": "raw",
+                        "qwen_base": "raw", "llama": "llama3"}
 
 
 def _require_lens_model(model: str) -> None:
@@ -1145,7 +1158,7 @@ def _cmd_lens_extract(args: argparse.Namespace) -> int:
     contract = _lens_resolve_contract(args, df)
 
     loader = _resolve_loader(args.model)
-    if args.flash_attn and args.model in ("mistral", "qwen"):
+    if args.flash_attn and args.model in _FLASH_ATTN_MODELS:
         print("Loading model with attn_implementation='flash_attention_2'")
         model, tokenizer, meta = loader(attn_implementation="flash_attention_2")
     else:
@@ -1657,7 +1670,7 @@ def _cmd_job_runner(args) -> int:
 # lazily so `--help` never pays for torch.
 # --------------------------------------------------------------------------
 
-_CAUSAL_MODELS = ("mistral", "qwen", "qwen_random")
+_CAUSAL_MODELS = ("mistral", "qwen", "qwen_random", "llama")
 _CAUSAL_SCHEMES = ("counterfactual", "noise")
 _PILOT_N = 150         # §12.5 pilot draw
 _CONFIRMATORY_N = 1500  # §4.2 committed sample size

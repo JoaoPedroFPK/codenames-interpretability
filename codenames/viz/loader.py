@@ -36,6 +36,9 @@ MODEL_PREFIXES: Dict[str, str] = {
     "bert_random": "random_bert",
     "t5": "t5",
     "modernbert": "modernbert",
+    "mistral_base": "mistral_base",
+    "qwen_base": "qwen_base",
+    "llama": "llama",
 }
 
 _INDEX_SUFFIX = "_vectors_subsample_index_"

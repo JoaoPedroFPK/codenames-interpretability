@@ -21,6 +21,8 @@ import pandas as pd
 
 # System message for the ``chatml`` strategy (Qwen and Random Qwen).
 _CHATML_SYSTEM_MESSAGE = "You are a helpful assistant."
+# Llama-3.1 templates default to this date; pinned so prompts are stable.
+_LLAMA3_DATE_STRING = "26 Jul 2024"
 
 
 _FEATURE_LABEL_MAP: Dict[str, str] = {
@@ -114,6 +116,9 @@ def build_prompt(
       (``"You are a helpful assistant."``) and calls
       ``tokenizer.apply_chat_template(..., tokenize=False,
       add_generation_prompt=True)``.
+    - ``"llama3"``: the same system/user pair rendered by the Llama-3.x
+      template with a frozen date string and the leading BOS literal removed
+      (the tokenizer re-adds it).
     - ``"raw"``: returns the instruction body verbatim with no wrapping.
     """
     instruction_body, feature_markers = build_instruction_body(
@@ -135,12 +140,34 @@ def build_prompt(
             tokenize=False,
             add_generation_prompt=True,
         )
+    elif chat_template_strategy == "llama3":
+        # Llama-3.x: same system/user pair as ChatML through the tokenizer's
+        # own template. Two deviations from a bare apply_chat_template call,
+        # both deliberate: (i) the template stamps a date into the system
+        # header, so it is frozen to the template's own default rather than
+        # today's date, or every hidden state would change daily; (ii) the
+        # rendered text starts with the literal <|begin_of_text|> and the
+        # tokenizer adds BOS again, so the literal is stripped and a forward
+        # pass sees exactly one BOS.
+        messages = [
+            {"role": "system", "content": _CHATML_SYSTEM_MESSAGE},
+            {"role": "user",   "content": instruction_body},
+        ]
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            date_string=_LLAMA3_DATE_STRING,
+        )
+        bos = getattr(tokenizer, "bos_token", None)
+        if bos and prompt.startswith(bos):
+            prompt = prompt[len(bos):]
     elif chat_template_strategy == "raw":
         prompt = instruction_body
     else:
         raise ValueError(
             f"Unknown chat_template_strategy: {chat_template_strategy!r}. "
-            "Expected one of: 'mistral_inst', 'chatml', 'raw'."
+            "Expected one of: 'mistral_inst', 'chatml', 'llama3', 'raw'."
         )
 
     return prompt, feature_markers
