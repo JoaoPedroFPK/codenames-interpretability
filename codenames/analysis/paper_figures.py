@@ -74,14 +74,20 @@ def _mark_hump(ax, x: float, y: float, label: str, color: str, *, dy: float = 0.
 def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
                  confound: pd.DataFrame, conc_summary: pd.DataFrame, *,
                  out_path: os.PathLike, pooling: str = "mean",
-                 condition: str = "no_social") -> Path:
-    """2x2: (a) decoder g(l) with humps, generation reference lines and the
+                 condition: str = "no_social", panels: str = "abcd") -> Path:
+    """(a) decoder g(l) with humps, generation reference lines and the
     random-init null; (b) anisotropy-adjusted margin, all models; (c) mean
     pairwise-cosine anisotropy, all models; (d) positional confound rho.
+    ``panels="ab"`` renders the one-row main-text version.
     """
-    plt = _paper_fig((PAPER_W, 4.6))
-    fig, axes = plt.subplots(2, 2, figsize=(PAPER_W, 4.6))
-    ax_a, ax_b, ax_c, ax_d = axes.ravel()
+    two_rows = panels == "abcd"
+    plt = _paper_fig((PAPER_W, 4.6 if two_rows else 2.4))
+    if two_rows:
+        fig, axes = plt.subplots(2, 2, figsize=(PAPER_W, 4.6))
+        ax_a, ax_b, ax_c, ax_d = axes.ravel()
+    else:
+        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(PAPER_W, 2.4))
+        ax_c = ax_d = None
 
     # (a) geometric top-1 for the decoders + null --------------------------
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
@@ -120,27 +126,31 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
         if sub.empty:
             continue
         _line(ax_b, sub["layer_frac"].to_numpy(), sub["adjusted_margin"].to_numpy(), m)
-        _line(ax_c, sub["layer_frac"].to_numpy(), sub["mean_anisotropy"].to_numpy(), m)
+        if ax_c is not None:
+            _line(ax_c, sub["layer_frac"].to_numpy(), sub["mean_anisotropy"].to_numpy(), m)
     ax_b.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
     ax_b.set_ylabel("Anisotropy-adjusted margin")
-    ax_c.set_ylabel("Mean pairwise cosine (anisotropy)")
-    ax_c.set_ylim(0, 1)
+    if ax_c is not None:
+        ax_c.set_ylabel("Mean pairwise cosine (anisotropy)")
+        ax_c.set_ylim(0, 1)
 
     # (d) positional confound ---------------------------------------------
-    for m in models:
-        sub = confound[confound["model"] == m].sort_values("layer_frac")
-        if sub.empty:
-            continue
-        _line(ax_d, sub["layer_frac"].to_numpy(), sub["mean_rho"].to_numpy(), m)
-    ax_d.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
-    ax_d.set_ylabel(r"Spearman $\rho$(position, cosine)")
+    if ax_d is not None:
+        for m in models:
+            sub = confound[confound["model"] == m].sort_values("layer_frac")
+            if sub.empty:
+                continue
+            _line(ax_d, sub["layer_frac"].to_numpy(), sub["mean_rho"].to_numpy(), m)
+        ax_d.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
+        ax_d.set_ylabel(r"Spearman $\rho$(position, cosine)")
 
-    for ax, letter in zip((ax_a, ax_b, ax_c, ax_d), "abcd"):
+    live = [ax for ax in (ax_a, ax_b, ax_c, ax_d) if ax is not None]
+    for ax, letter in zip(live, "abcd"):
         ax.set_xlabel(DEPTH_LABEL)
         ax.set_xlim(0, 1)
         _letter(ax, letter)
-    _top_legend(fig, _model_handles(models), ncol=4)
-    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    _top_legend(fig, _model_handles(models), ncol=4 if two_rows else 7)
+    fig.tight_layout(rect=(0, 0, 1, 0.91 if two_rows else 0.86))
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -289,9 +299,9 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
     ``per_model`` maps model key -> (scan grid ndarray[layers, roles], effects
     DataFrame with columns layer, role, width, row_id, effect).
     """
-    plt = _paper_fig((PAPER_W, 2.6 * len(per_model)))
+    plt = _paper_fig((PAPER_W, 2.35 * len(per_model)))
     n = len(per_model)
-    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.6 * n), squeeze=False,
+    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.35 * n), squeeze=False,
                              gridspec_kw={"width_ratios": [1.0, 1.6]})
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
@@ -368,15 +378,17 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
 def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
                       effects_by_model: Dict[str, pd.DataFrame], *,
                       out_path: os.PathLike, models: Sequence[str] = DECODERS,
-                      pooling: str = "mean", condition: str = "no_social") -> Path:
+                      pooling: str = "mean", condition: str = "no_social",
+                      shuffle: Optional[pd.DataFrame] = None,
+                      null_model: str = DECODER_NULL, show_tuned: bool = True) -> Path:
     """One panel per decoder on an absolute layer axis: cosine g(l) (grey), raw
     lens L(l) at p_read (model colour), and the real patch effects for the hint
     span and the answer positions (role colours). Hump 1, trough, hump 2 and the
     output are annotated from g(l). Models without patching data show the two
     correlational curves only.
     """
-    plt = _paper_fig((PAPER_W, 2.5))
-    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.5), sharey=True)
+    plt = _paper_fig((PAPER_W, 2.3))
+    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.3), sharey=True)
     axes = np.atleast_1d(axes)
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
@@ -398,10 +410,27 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
                             fontsize=5.2, color="#666666", zorder=6)
                 ax.plot([gx[i]], [gy[i]], marker="v", markersize=3.5, color="#9a9a9a",
                         markeredgecolor="white", markeredgewidth=0.4, zorder=4)
+        null = lens_curves[(lens_curves["model"] == null_model) & (lens_curves["lens"] == "raw")]
+        if not null.empty:
+            ax.axhspan(float(null["top1"].min()), float(null["ci_hi"].max()),
+                       color="#888888", alpha=0.18, lw=0, zorder=0,
+                       label="random-init lens" if m == models[0] else None)
+        if shuffle is not None:
+            sh = shuffle[shuffle["model"] == m]
+            if not sh.empty:
+                ax.axhline(float(sh["top1_p97_5"].max()), color="#444444", lw=0.6, ls=":",
+                           zorder=1, label="shuffled labels (97.5th pct)" if m == models[0] else None)
         L = lens_curves[(lens_curves["model"] == m) & (lens_curves["lens"] == "raw")].sort_values("layer")
         if not L.empty:
+            ax.fill_between(L["layer"], L["ci_lo"], L["ci_hi"], color=s["color"], alpha=0.18, lw=0)
             ax.plot(L["layer"], L["top1"], color=s["color"], lw=1.2, marker=s["marker"],
-                    markersize=2.0, label="lens $L(\\ell)$ at $p_{read}$", zorder=3)
+                    markersize=2.0, label="raw lens $L(\\ell)$ at $p_{read}$", zorder=3)
+            d = emergence_depth(L["top1"].to_numpy())
+            ax.axvline(int(L["layer"].iloc[d]), color=s["color"], lw=0.6, ls="-.", zorder=1)
+        T = lens_curves[(lens_curves["model"] == m) & (lens_curves["lens"] == "tuned")].sort_values("layer")
+        if show_tuned and not T.empty:
+            ax.plot(T["layer"], T["top1"], color=s["color"], lw=0.9, ls="--", marker=s["marker"],
+                    markersize=1.8, markerfacecolor="white", label="tuned lens", zorder=3)
         eff = effects_by_model.get(m)
         if eff is not None:
             cur = confirmatory_curve(eff, width=1)
@@ -424,7 +453,7 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
     axes[0].set_ylabel("top-1 fraction / patch effect $e$")
     handles, labels = axes[0].get_legend_handles_labels()
     _top_legend(fig, handles, ncol=4)
-    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches="tight")
@@ -447,6 +476,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--analysis-dir", default="output/analysis")
     ap.add_argument("--lens-dir", default="output/lens_analysis")
     ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
+    ap.add_argument("--panels", default="abcd", help="geometry panels: abcd or ab")
     ap.add_argument("--emergence", default="mistral=20,qwen=25",
                     help="model=layer pairs for the lens emergence marker")
     ap.add_argument("--pooling", default="mean")
@@ -458,7 +488,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _read(os.path.join(a.analysis_dir, "analysis_layer_margins.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_position_confound.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_concordance.csv")),
-            out_path=a.out, pooling=a.pooling, condition=a.condition)
+            out_path=a.out, pooling=a.pooling, condition=a.condition, panels=a.panels)
         print(f"wrote {out}")
     elif a.fig == "lens":
         out = fig_lens(
@@ -490,7 +520,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out = fig_triangulation(
             _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
             _read(os.path.join(a.lens_dir, f"lens_curves_answer_{a.condition}.csv")),
-            effects, out_path=a.out, pooling=a.pooling, condition=a.condition)
+            effects, out_path=a.out, pooling=a.pooling, condition=a.condition,
+            shuffle=_read(os.path.join(a.lens_dir, f"lens_shuffle_control_answer_{a.condition}.csv")))
         print(f"wrote {out}")
     return 0
 
