@@ -1036,6 +1036,20 @@ def _make_lens_extract_parser(sp) -> argparse.ArgumentParser:
                         "table {prefix}_causal_pairs_{cond}.csv) scoping the "
                         "candidate-span dump to the causal subsample "
                         "(causal_spec.md §12.4).")
+    p.add_argument("--dump-positions", default=None,
+                   help="Comma list of matched positions to dump as extra "
+                        "lens channels (hint,cand_target): mean over the span, "
+                        "one file per channel, from one joint pass per board. "
+                        "Requires a single condition.")
+    p.add_argument("--dump-attention", action="store_true",
+                   help="Also record the attention mass from p_read onto each "
+                        "role per block (needs --generation-csv; run WITHOUT "
+                        "--flash-attn).")
+    p.add_argument("--positions-only", action="store_true",
+                   help="With --dump-positions/--dump-attention: skip the "
+                        "generating/answer dumps and write only the new files "
+                        "(never rewrites artefacts produced under a different "
+                        "attention kernel).")
     return p
 
 
@@ -1081,11 +1095,13 @@ def _make_lens_apply_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--lenses", default="raw,tuned",
                    help="Comma-separated subset of: raw,tuned.")
     p.add_argument("--channel", default="generating",
-                   choices=["generating", "answer"],
+                   choices=["generating", "answer", "hint", "cand_target"],
                    help="Which position dump to score: 'answer' = p_read "
                         "(PRIMARY readout, lens_spec.md §5.1; skips turns "
                         "without a resolved p*), 'generating' = final prompt "
-                        "token (secondary/calibration channel).")
+                        "token (secondary/calibration channel), 'hint' / "
+                        "'cand_target' = mean over that span (matched-position "
+                        "comparison; lens-extract --dump-positions).")
     return p
 
 
@@ -1106,11 +1122,13 @@ def _make_lens_analyze_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
     p.add_argument("--channel", default="generating",
-                   choices=["generating", "answer"],
+                   choices=["generating", "answer", "hint", "cand_target"],
                    help="Which scored channel to analyze: 'answer' = p_read "
                         "(PRIMARY, lens_spec.md §5.1), 'generating' = "
-                        "secondary/calibration. The random null falls back "
-                        "to its generating scores on the answer channel.")
+                        "secondary/calibration, 'hint' / 'cand_target' = the "
+                        "matched-position channels (no calibration gate: they "
+                        "are not output channels). The random null falls back "
+                        "to its generating scores on every other channel.")
     p.add_argument("--out-dir", default=os.path.join("output", "lens_analysis"))
     p.add_argument("--figures-dir", default=os.path.join("visualization", "lens"))
     p.add_argument("--n-boot", type=int, default=5000)
@@ -1146,6 +1164,34 @@ def _cmd_lens_extract(args: argparse.Namespace) -> int:
         print(f"Candidate-span dump scoped to "
               f"{len(candidate_span_row_ids)} row_ids "
               f"({args.candidate_span_csv})")
+
+    want_positions = bool(getattr(args, "dump_positions", None)) or \
+        bool(getattr(args, "dump_attention", False))
+    if want_positions:
+        from .lens.positions import POSITION_CHANNELS, run_position_extraction
+
+        if len(conditions) != 1:
+            raise ValueError("--dump-positions/--dump-attention need a single "
+                             "condition per call")
+        if args.dump_attention and args.flash_attn:
+            raise ValueError("--dump-attention needs eager/sdpa attention; "
+                             "drop --flash-attn")
+        if args.dump_attention and not args.generation_csv:
+            raise ValueError("--dump-attention needs --generation-csv (p_read)")
+        channels = (tuple(c.strip() for c in args.dump_positions.split(",") if c.strip())
+                    if args.dump_positions else POSITION_CHANNELS)
+        run_position_extraction(
+            model=model, tokenizer=tokenizer, df=df_sample,
+            base_dir=args.output_dir, prefix=meta["prefix"], contract=contract,
+            chat_template_strategy=meta["chat_template_strategy"],
+            num_layers=meta["num_layers"], hidden_dim=meta["hidden_dim"],
+            mode_name=conditions[0], device=meta["device"],
+            generation_csv=args.generation_csv, channels=channels,
+            dump_attention=bool(args.dump_attention), resume=args.resume,
+            checkpoint_dir=args.checkpoint_dir,
+        )
+        if getattr(args, "positions_only", False):
+            return 0
 
     run_lens_extraction(
         model=model,
@@ -1242,7 +1288,23 @@ def _cmd_lens_apply(args: argparse.Namespace) -> int:
             lenses = [x for x in lenses if x != "tuned"]
 
     for mode_name in (c.strip() for c in args.conditions.split(",")):
-        if args.channel == "answer":
+        if args.channel in ("hint", "cand_target"):
+            import pandas as pd
+
+            hidden = os.path.join(
+                args.output_dir, f"{prefix}_lens_pos_{args.channel}_{mode_name}_f16.npy")
+            index_path = os.path.join(
+                args.output_dir, f"{prefix}_lens_pos_index_{mode_name}.csv")
+            if not os.path.exists(hidden):
+                print(f"  WARNING: no {args.channel} dump for '{mode_name}' "
+                      f"({hidden}); skipping.")
+                continue
+            index = pd.read_csv(index_path)
+            index["ok"] = index["ok"].astype(bool) & index[f"{args.channel}_ok"].astype(bool)
+            print(f"  {args.channel} channel: {int(index['ok'].sum())}/{len(index)} "
+                  f"boards with a located span")
+            label = f"{args.channel}_{mode_name}"
+        elif args.channel == "answer":
             import pandas as pd
 
             hidden = os.path.join(

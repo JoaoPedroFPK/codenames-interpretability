@@ -216,7 +216,11 @@ def run_analysis(
     ``out_dir`` and returns the per-model summary dict.
     """
     os.makedirs(out_dir, exist_ok=True)
-    label = mode if channel == "generating" else f"answer_{mode}"
+    label = mode if channel == "generating" else f"{channel}_{mode}"
+    # The calibration gate (final-layer lens == greedy output) is defined
+    # only for the output channels; a span-pooled state is not an output
+    # channel and agreement there is neither expected nor a finding.
+    gate_applicable = channel in ("generating", "answer")
     concordance_csv = os.path.join(output_root, "analysis",
                                    "analysis_concordance_by_layer.csv")
 
@@ -231,7 +235,7 @@ def run_analysis(
     random_path = None
     if random_model is not None:
         random_path = _scores_path(random_model)
-        if not os.path.exists(random_path) and channel == "answer":
+        if not os.path.exists(random_path) and channel != "generating":
             fallback = _scores_path(random_model, mode)
             if os.path.exists(fallback):
                 print(f"  [lens-analyze] null '{random_model}' has no answer "
@@ -261,12 +265,19 @@ def run_analysis(
 
         gen_csv = os.path.join(output_root, f"{m}_outputs",
                                f"{m}_generation_{mode}.csv")
-        calib = (calibration_check(scores, gen_csv)
-                 if os.path.exists(gen_csv) else
-                 {"agreement": np.nan, "n_parseable": 0,
-                  "word_first_agreement": np.nan, "n_word_first": 0,
-                  "lens_top1_final": np.nan, "generation_acc": np.nan,
-                  "passes_gate": False})
+        if not gate_applicable:
+            calib = {"agreement": np.nan, "n_parseable": 0,
+                     "word_first_agreement": np.nan, "n_word_first": 0,
+                     "lens_top1_final": np.nan, "generation_acc": np.nan,
+                     "passes_gate": True, "gate_applicable": False}
+        else:
+            calib = (calibration_check(scores, gen_csv)
+                     if os.path.exists(gen_csv) else
+                     {"agreement": np.nan, "n_parseable": 0,
+                      "word_first_agreement": np.nan, "n_word_first": 0,
+                      "lens_top1_final": np.nan, "generation_acc": np.nan,
+                      "passes_gate": False})
+            calib["gate_applicable"] = True
         calibrations.append({"model": m, **calib})
         if not calib["passes_gate"]:
             print(f"  WARNING: calibration gate FAILED for '{m}' "
@@ -316,5 +327,24 @@ def run_analysis(
                 os.path.join(out_dir, f"lens_trained_vs_random_{label}.csv"),
                 index=False)
 
+    for m in models:
+        per_board = os.path.join(output_root, f"{m}_outputs",
+                                 f"{m}_lens_attention_pread_{mode}.csv")
+        if os.path.exists(per_board):
+            agg_dir = os.path.join(output_root, "analysis")
+            os.makedirs(agg_dir, exist_ok=True)
+            out_csv = os.path.join(agg_dir, f"attention_from_pread_{m}_{mode}.csv")
+            aggregate_attention(pd.read_csv(per_board)).to_csv(out_csv, index=False)
+            print(f"  attention from p_read (per layer) -> {out_csv}")
+
     print(f"  lens analysis written to {out_dir}")
     return summary
+
+
+def aggregate_attention(per_board: pd.DataFrame) -> pd.DataFrame:
+    """Per-layer mean (and turn count) of the attention mass from p_read onto
+    each role, from the per-board table written by ``lens.positions``."""
+    cols = [c for c in per_board.columns if c.startswith("to_")]
+    out = per_board.groupby("layer")[cols].mean().reset_index()
+    out["n_turns"] = per_board.groupby("layer")["row_id"].nunique().to_numpy()
+    return out
