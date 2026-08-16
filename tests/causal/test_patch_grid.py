@@ -327,3 +327,57 @@ def test_grid_resume_is_byte_identical(wired, dataset, tmp_path):
     key_n = ["row_id", "layer", "width", "n_positions"]
     pd.testing.assert_frame_equal(first_nulls.sort_values(key_n).reset_index(drop=True),
                                   again_nulls.sort_values(key_n).reset_index(drop=True))
+
+
+# --- necessity direction (T4): corrupt -> clean -------------------------------
+
+def test_noise_direction_identity_at_layer_zero_hint_span(tiny):
+    """Writing the CORRUPT hint embeddings into the clean run at layer 0 IS the
+    corrupt run when the hint span is the only differing token span (no
+    teacher-forced suffix), so the necessity effect must be exactly 1; and a
+    role that cannot differ between the runs (cand_target) must give ~0."""
+    df = _ragged_frame()
+    grid, nulls = run_grid_stage(**_common(tiny, df), roles=("hint", "cand_target"),
+                                 layers="0", window_widths=(1,), batch_size=4,
+                                 direction="noise")
+    assert (grid["direction"] == "noise").all() and (nulls["direction"] == "noise").all()
+    h = grid[(grid["role"] == "hint") & np.isfinite(grid["effect"])]
+    assert len(h) >= 2
+    np.testing.assert_allclose(h["effect"], 1.0, atol=1e-3)
+    c = grid[(grid["role"] == "cand_target") & np.isfinite(grid["effect"])]
+    np.testing.assert_allclose(c["effect"], 0.0, atol=1e-3)
+
+
+def test_denoise_is_the_default_direction_and_is_recorded(tiny):
+    grid, nulls = run_grid_stage(**_common(tiny), roles=("hint",), layers="0",
+                                 window_widths=(1,), batch_size=4)
+    assert (grid["direction"] == "denoise").all()
+    h = grid[np.isfinite(grid["effect"])]
+    np.testing.assert_allclose(h["effect"], 1.0, atol=1e-3)   # P2-style identity
+
+
+def test_patch_parser_accepts_direction():
+    args = build_parser().parse_args([
+        "causal-patch", "--model", "mistral", "--output-dir", "/tmp/x",
+        "--dataset", "/tmp/d.csv", "--grid", "--direction", "noise"])
+    assert args.direction == "noise"
+    assert build_parser().parse_args([
+        "causal-patch", "--model", "mistral", "--output-dir", "/tmp/x",
+        "--dataset", "/tmp/d.csv"]).direction == "denoise"
+
+
+def test_noise_direction_writes_its_own_files(wired, dataset, tmp_path):
+    out = tmp_path / "causal"
+    out.mkdir()
+    common = ["--model", "mistral", "--output-dir", str(out), "--dataset", dataset,
+              "--condition", "no_social", "--pilot-n", "0", "--grid", "--roles", "hint",
+              "--layers", "0,1", "--window-widths", "1", "--batch-size", "4"]
+    assert runner.cmd_patch(_args(["causal-patch", *common, "--direction", "noise"])) == 0
+    assert (out / "mistral_causal_effects_grid_counterfactual_no_social_noise.parquet").exists()
+    assert (out / "mistral_causal_nulls_counterfactual_no_social_noise.parquet").exists()
+    assert not (out / "mistral_causal_effects_grid_counterfactual_no_social.parquet").exists()
+    assert runner.cmd_analyze(_args(["causal-analyze", "--model", "mistral",
+                                     "--output-dir", str(out), "--condition", "no_social",
+                                     "--grid", "--direction", "noise",
+                                     "--n-boot", "20", "--n-perm", "10"])) == 0
+    assert (out / "mistral_causal_grid_claims_counterfactual_no_social_noise.csv").exists()

@@ -137,6 +137,7 @@ def run_grid_stage(
     *, model, tokenizer, df_sample, chat_template_strategy, mode, seed,
     roles: Sequence[str] = GRID_ROLES, layers: str = _ALL,
     window_widths: Sequence[int] = (1,), batch_size: int = 1,
+    direction: str = "denoise",
     device: Optional[str] = None, progress=None,
     checkpoint_dir: Optional[str] = None, prefix: str = "causal",
     resume: bool = False, flush_every: int = 10,
@@ -149,15 +150,27 @@ def run_grid_stage(
     has one ``random_site`` row per (layer, width, turn, distinct token count).
     Resumable through the manifest machinery, byte-identical to an
     uninterrupted run.
+
+    ``direction`` selects the estimand (spec §5A):
+
+    * ``denoise`` (sufficiency, primary): clean states written into the
+      corrupted run; ``e = (LD_patched - LD_corrupt) / (LD_clean - LD_corrupt)``.
+    * ``noise`` (necessity, task T4): CORRUPT states written into the CLEAN
+      run; ``e = (LD_clean - LD_patched) / (LD_clean - LD_corrupt)``, so 1
+      means the patch destroyed the answer completely and 0 that removing
+      the clean state at that site changed nothing. Same pairs, same
+      readout, same nulls; only the source and target of the patch swap.
     """
     from .. import checkpoint
 
+    if direction not in ("denoise", "noise"):
+        raise ValueError(f"direction must be 'denoise' or 'noise', got {direction!r}")
     roles = tuple(roles)
     ctx = _Context(model=model, tokenizer=tokenizer, df_sample=df_sample,
                    chat_template_strategy=chat_template_strategy, mode=mode,
                    seed=seed, device=device, generation_csv=generation_csv)
 
-    ckpt_prefix = f"{prefix}_patchgrid"
+    ckpt_prefix = f"{prefix}_patchgrid" + ("" if direction == "denoise" else f"_{direction}")
     grid_rows: List[Dict[str, object]] = []
     null_rows: List[Dict[str, object]] = []
     pairs_done = 0
@@ -206,15 +219,27 @@ def run_grid_stage(
                 ctx.joint_len(corrupt_prompt + corrupt_suffix):
             ctx.suffix_misaligned += 1
             continue
-        cache, clean_logits, n_positions = ctx.clean_cache(clean_prompt + suffix, p_read)
+        clean_text = clean_prompt + suffix
+        corrupt_text = corrupt_prompt + corrupt_suffix
+        cache, clean_logits, n_positions = ctx.clean_cache(clean_text, p_read)
         p_abs = p_read if p_read >= 0 else n_positions - 1
         if layer_list is None:
             layer_list = parse_layers(layers, len(cache))
         table = ctx.table(pair.row_id)
         ld_clean = logit_difference(clean_logits, table, pair.clean_target, pair.donor_target)
-        ld_corrupt = logit_difference(
-            ctx.corrupt_logits(corrupt_prompt + corrupt_suffix, p_read), table,
-            pair.clean_target, pair.donor_target)
+        if direction == "denoise":
+            ld_corrupt = logit_difference(
+                ctx.corrupt_logits(corrupt_text, p_read), table,
+                pair.clean_target, pair.donor_target)
+            source_cache, base_text = cache, corrupt_text
+        else:
+            # Necessity: the corrupt run supplies the states, the clean run
+            # is the one being patched. §5A alignment guarantees the two
+            # sequences share every position index.
+            corrupt_cache, corrupt_logits, _ = ctx.clean_cache(corrupt_text, p_read)
+            ld_corrupt = logit_difference(corrupt_logits, table,
+                                          pair.clean_target, pair.donor_target)
+            source_cache, base_text = corrupt_cache, clean_text
 
         by_role = role_positions(ctx.roles(pair, clean_prompt, n_positions))
         positions_of = grid_role_positions(by_role, p_abs, roles)
@@ -243,14 +268,20 @@ def run_grid_stage(
                 for k, positions in null_sets.items():
                     if positions:
                         jobs.append(("null", k, layer, width, [(l, p) for l in band for p in positions]))
+        # run_patch_many measures (LD_patched - LD_corrupt) / (LD_clean -
+        # LD_corrupt) for whatever it is handed as "clean cache" and "corrupt
+        # prompt". In the noise direction the roles are swapped, and the
+        # necessity effect is 1 minus that ratio.
         effects = run_patch_many(
-            model=model, tokenizer=tokenizer, clean_cache=cache,
-            corrupt_prompt=corrupt_prompt + corrupt_suffix,
+            model=model, tokenizer=tokenizer, clean_cache=source_cache,
+            corrupt_prompt=base_text,
             site_sets=[j[4] for j in jobs], readout_table=table,
             clean_target=pair.clean_target, donor_target=pair.donor_target,
             p_star=p_read, ld_clean=ld_clean, ld_corrupt=ld_corrupt,
             device=ctx.device, batch_size=batch_size,
         ) if jobs else np.zeros(0)
+        if direction == "noise":
+            effects = 1.0 - effects
         forwards += len(jobs) + 2
         measured: Dict[Tuple[str, object, int, int], float] = {
             (kind, key, layer, width): float(effects[i])
@@ -263,7 +294,7 @@ def run_grid_stage(
                     g_shard.append({
                         "layer": int(layer), "role": str(role),
                         "n_positions": len(positions), "width": int(width),
-                        "row_id": int(pair.row_id),
+                        "row_id": int(pair.row_id), "direction": direction,
                         "effect": measured.get(("grid", role, layer, width), float("nan")),
                     })
                 for k, positions in null_sets.items():
@@ -272,6 +303,7 @@ def run_grid_stage(
                         "n_positions": len(positions), "matched_n": int(k),
                         "matched_roles": "|".join(counts[k]),
                         "width": int(width), "row_id": int(pair.row_id),
+                        "direction": direction,
                         "effect": measured.get(("null", k, layer, width), float("nan")),
                     })
         if progress is not None:
@@ -300,8 +332,8 @@ def run_grid_stage(
         print(f"  [grid] {ctx.suffix_misaligned} pairs dropped: teacher-forced "
               f"suffix misaligned")
 
-    grid_cols = ["layer", "role", "n_positions", "width", "row_id", "effect"]
+    grid_cols = ["layer", "role", "n_positions", "width", "row_id", "direction", "effect"]
     null_cols = ["layer", "role", "n_positions", "matched_n", "matched_roles",
-                 "width", "row_id", "effect"]
+                 "width", "row_id", "direction", "effect"]
     return (pd.DataFrame(grid_rows, columns=grid_cols),
             pd.DataFrame(null_rows, columns=null_cols))

@@ -33,6 +33,9 @@ def _paths(args) -> Dict[str, str]:
     base = args.output_dir
     condition = getattr(args, "condition", "no_social")
     scheme = getattr(args, "scheme", "counterfactual")
+    # The necessity direction (corrupt -> clean) gets its own grid files.
+    direction = getattr(args, "direction", "denoise") or "denoise"
+    dsuf = "" if direction == "denoise" else f"_{direction}"
     return {
         "base": base,
         "prefix": prefix,
@@ -43,11 +46,11 @@ def _paths(args) -> Dict[str, str]:
         "effects": os.path.join(
             base, f"{prefix}_causal_effects_{scheme}_{condition}.parquet"),
         "grid": os.path.join(
-            base, f"{prefix}_causal_effects_grid_{scheme}_{condition}.parquet"),
+            base, f"{prefix}_causal_effects_grid_{scheme}_{condition}{dsuf}.parquet"),
         "nulls": os.path.join(
-            base, f"{prefix}_causal_nulls_{scheme}_{condition}.parquet"),
+            base, f"{prefix}_causal_nulls_{scheme}_{condition}{dsuf}.parquet"),
         "grid_claims": os.path.join(
-            base, f"{prefix}_causal_grid_claims_{scheme}_{condition}.csv"),
+            base, f"{prefix}_causal_grid_claims_{scheme}_{condition}{dsuf}.csv"),
         "steer": os.path.join(base, f"{prefix}_causal_steer_{condition}.csv"),
         "pilot": os.path.join(base, f"{prefix}_causal_pilot_{condition}.csv"),
         "claims": os.path.join(base, f"{prefix}_causal_claims_{condition}.csv"),
@@ -240,6 +243,7 @@ def _cmd_patch_grid(args) -> int:
         chat_template_strategy=meta["chat_template_strategy"],
         mode=args.condition, seed=args.seed, roles=roles, layers=args.layers,
         window_widths=widths, batch_size=int(getattr(args, "batch_size", 1)),
+        direction=getattr(args, "direction", "denoise") or "denoise",
         checkpoint_dir=os.path.join(paths["base"], "checkpoints"),
         prefix=paths["prefix"], resume=bool(getattr(args, "resume", False)),
         generation_csv=_generation_csv(args, paths),

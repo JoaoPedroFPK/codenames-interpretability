@@ -1778,6 +1778,11 @@ def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
                    help="--grid only: site sets patched per forward. 1 is the "
                         "reference path; >1 is an acceleration and may drift "
                         "at the kernel level like every other one.")
+    p.add_argument("--direction", default="denoise", choices=["denoise", "noise"],
+                   help="--grid only: 'denoise' = clean states into the corrupt "
+                        "run (sufficiency, primary); 'noise' = corrupt states "
+                        "into the clean run (necessity; e = share of the "
+                        "answer destroyed). Noise writes *_noise files.")
     return p
 
 
@@ -1853,6 +1858,8 @@ def _make_causal_analyze_parser(sp) -> argparse.ArgumentParser:
                         "contrast against the matched random-site null, and "
                         "the sign-flip permutation max-statistic threshold.")
     p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
+    p.add_argument("--direction", default="denoise", choices=["denoise", "noise"],
+                   help="--grid only: which grid to analyse (see causal-patch).")
     return p
 
 
