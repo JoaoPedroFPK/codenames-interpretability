@@ -299,9 +299,9 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
     ``per_model`` maps model key -> (scan grid ndarray[layers, roles], effects
     DataFrame with columns layer, role, width, row_id, effect).
     """
-    plt = _paper_fig((PAPER_W, 2.35 * len(per_model)))
+    plt = _paper_fig((PAPER_W, 2.15 * len(per_model)))
     n = len(per_model)
-    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.35 * n), squeeze=False,
+    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.15 * n), squeeze=False,
                              gridspec_kw={"width_ratios": [1.0, 1.6]})
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
