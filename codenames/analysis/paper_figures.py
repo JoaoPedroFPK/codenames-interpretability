@@ -315,7 +315,11 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         im = ax_h.imshow(grid[:, shown], aspect="auto", origin="lower",
                          cmap="Blues", vmin=0, vmax=scan_clip)
         ax_h.set_xticks(range(len(shown)))
-        ax_h.set_xticklabels([ROLES[i].replace("_", "\n") for i in shown],
+        pretty = {"hint": "hint span", "post_hint": "post-hint", "list_scaffold": "list scaffold",
+                  "cand_target": "cand. (target)", "cand_donor": "cand. (donor)",
+                  "cand_other": "cand. (other)", "question": "question",
+                  "final": "generating pos.", "generation": "answer pos."}
+        ax_h.set_xticklabels([pretty.get(ROLES[i], ROLES[i]) for i in shown],
                              fontsize=5, rotation=90)
         ax_h.set_ylabel("Layer")
         ax_h.set_title("attribution scan (screening)", fontsize=6, pad=2, loc="right")
@@ -434,7 +438,7 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
         eff = effects_by_model.get(m)
         if eff is not None:
             cur = confirmatory_curve(eff, width=1)
-            for role in ("hint", "generation"):
+            for role in ("hint", "cand_donor", "generation"):
                 c = cur[cur["role"] == role]
                 if c.empty:
                     continue
