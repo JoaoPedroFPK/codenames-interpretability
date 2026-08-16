@@ -161,3 +161,98 @@ def run_patch(
     return normalized_effect(
         ld_patched=ld_patched, ld_clean=ld_clean, ld_corrupt=ld_corrupt
     )
+
+
+def _batched_patch_hook(per_element: Sequence[Tuple[Sequence[int], torch.Tensor]]) -> Callable:
+    """Forward hook writing a DIFFERENT site set into each batch element.
+
+    ``per_element[b]`` is ``(positions, values)`` for batch row ``b``; rows with
+    an empty position list are left untouched.
+    """
+    def hook(_module, _inputs, output):
+        is_tuple = isinstance(output, tuple)
+        hidden = output[0] if is_tuple else output
+        for b, (positions, values) in enumerate(per_element):
+            for slot, position in enumerate(positions):
+                hidden[b, position, :] = values[slot].to(hidden.dtype).to(hidden.device)
+        return (hidden,) + tuple(output[1:]) if is_tuple else hidden
+    return hook
+
+
+def _register_batched(model, layers, site_sets: Sequence[Sequence[Site]],
+                      clean_cache) -> List:
+    """Hook each cached index once, carrying every batch element's positions."""
+    by_layer: Dict[int, List[Tuple[List[int], torch.Tensor]]] = {}
+    n = len(site_sets)
+    for b, sites in enumerate(site_sets):
+        grouped: Dict[int, List[int]] = {}
+        for layer, position in sites:
+            grouped.setdefault(layer, []).append(position)
+        for layer, positions in grouped.items():
+            if layer not in by_layer:
+                by_layer[layer] = [([], torch.empty(0)) for _ in range(n)]
+            by_layer[layer][b] = (
+                positions, torch.stack([clean_cache[layer][0, p] for p in positions]))
+
+    handles = []
+    top = len(clean_cache) - 1
+    final_norm = _final_norm(model)
+    for layer, per_element in by_layer.items():
+        if layer == 0:
+            module = model.get_input_embeddings()
+        elif layer == top and final_norm is not None:
+            module = final_norm
+        else:
+            module = layers[layer - 1]
+        handles.append(module.register_forward_hook(_batched_patch_hook(per_element)))
+    return handles
+
+
+def run_patch_many(
+    *,
+    model,
+    tokenizer,
+    clean_cache: Sequence[torch.Tensor],
+    corrupt_prompt: str,
+    site_sets: Sequence[Sequence[Site]],
+    readout_table: Dict[str, List[int]],
+    clean_target: str,
+    donor_target: str,
+    p_star: int,
+    ld_clean: float,
+    ld_corrupt: float,
+    device: str = "cpu",
+    batch_size: int = 1,
+) -> np.ndarray:
+    """``run_patch`` for many site sets on ONE corrupted prompt, batched.
+
+    The corrupted input is repeated ``batch_size`` times (no padding, so no
+    attention-mask asymmetry) and each batch row receives its own site set.
+    ``batch_size=1`` is the reference path and reproduces ``run_patch`` call by
+    call; larger batches are an acceleration and may drift at the kernel level
+    like every other acceleration flag in this project. Empty site sets cost no
+    forward: their effect is 0 by definition (P3 identity).
+    """
+    layers = _decoder_layers(model)
+    single = tokenizer(corrupt_prompt, return_tensors="pt").to(device)
+    out = np.full(len(site_sets), np.nan, dtype=float)
+    todo = [i for i, s in enumerate(site_sets) if len(s) > 0]
+    for i, s in enumerate(site_sets):
+        if len(s) == 0:
+            out[i] = normalized_effect(ld_patched=ld_corrupt, ld_clean=ld_clean,
+                                       ld_corrupt=ld_corrupt)
+    for start in range(0, len(todo), max(1, int(batch_size))):
+        chunk = todo[start:start + max(1, int(batch_size))]
+        inputs = {k: v.repeat(len(chunk), *([1] * (v.dim() - 1))) for k, v in single.items()}
+        handles = _register_batched(model, layers, [site_sets[i] for i in chunk], clean_cache)
+        try:
+            with torch.no_grad():
+                logits = model(**inputs).logits[:, p_star].detach().float().cpu().numpy()
+        finally:
+            for handle in handles:
+                handle.remove()
+        for row, i in enumerate(chunk):
+            ld_patched = logit_difference(logits[row], readout_table, clean_target, donor_target)
+            out[i] = normalized_effect(ld_patched=ld_patched, ld_clean=ld_clean,
+                                       ld_corrupt=ld_corrupt)
+    return out

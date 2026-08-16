@@ -42,6 +42,12 @@ def _paths(args) -> Dict[str, str]:
         "scan": os.path.join(base, f"{prefix}_causal_scan_{scheme}_{condition}.npy"),
         "effects": os.path.join(
             base, f"{prefix}_causal_effects_{scheme}_{condition}.parquet"),
+        "grid": os.path.join(
+            base, f"{prefix}_causal_effects_grid_{scheme}_{condition}.parquet"),
+        "nulls": os.path.join(
+            base, f"{prefix}_causal_nulls_{scheme}_{condition}.parquet"),
+        "grid_claims": os.path.join(
+            base, f"{prefix}_causal_grid_claims_{scheme}_{condition}.csv"),
         "steer": os.path.join(base, f"{prefix}_causal_steer_{condition}.csv"),
         "pilot": os.path.join(base, f"{prefix}_causal_pilot_{condition}.csv"),
         "claims": os.path.join(base, f"{prefix}_causal_claims_{condition}.csv"),
@@ -186,6 +192,9 @@ def cmd_patch(args) -> int:
     """Stage 2: real patches on the candidate loci. The evidence stage."""
     from .stages import run_patch_stage
 
+    if getattr(args, "grid", False):
+        return _cmd_patch_grid(args)
+
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
     loci_path = paths["scan"].replace(".npy", "_loci.csv")
@@ -211,6 +220,36 @@ def cmd_patch(args) -> int:
     finite = int(effects["effect"].notna().sum())
     print(f"  {len(effects)} patch measurements ({finite} finite) "
           f"over {effects['row_id'].nunique()} turns -> {paths['effects']}")
+    return 0
+
+
+def _cmd_patch_grid(args) -> int:
+    """Stage 2 (grid mode): every role at every layer, plus matched nulls."""
+    from .grid import parse_roles, run_grid_stage
+
+    paths = _paths(args)
+    os.makedirs(paths["base"], exist_ok=True)
+    roles = parse_roles(args.roles)
+    model, tokenizer, meta = _load_model(args.model)
+    df = _sample(args.dataset, args.sample_size, args.seed,
+                 exclude_pilot_n=getattr(args, "pilot_n", 0))
+    widths = tuple(int(w) for w in str(args.window_widths).split(",") if w.strip())
+
+    grid, nulls = run_grid_stage(
+        model=model, tokenizer=tokenizer, df_sample=df,
+        chat_template_strategy=meta["chat_template_strategy"],
+        mode=args.condition, seed=args.seed, roles=roles, layers=args.layers,
+        window_widths=widths, batch_size=int(getattr(args, "batch_size", 1)),
+        checkpoint_dir=os.path.join(paths["base"], "checkpoints"),
+        prefix=paths["prefix"], resume=bool(getattr(args, "resume", False)),
+        generation_csv=_generation_csv(args, paths),
+    )
+    grid.to_parquet(paths["grid"], index=False)
+    nulls.to_parquet(paths["nulls"], index=False)
+    finite = int(grid["effect"].notna().sum())
+    print(f"  grid: {len(grid)} cells ({finite} finite) over "
+          f"{grid['row_id'].nunique()} turns, roles {list(roles)} -> {paths['grid']}")
+    print(f"  nulls: {len(nulls)} random-site cells -> {paths['nulls']}")
     return 0
 
 
@@ -295,6 +334,9 @@ def cmd_analyze(args) -> int:
     """Offline: apply the §3.4 claim gate to saved per-turn effects."""
     from .analysis import benjamini_hochberg, claim_gate, cluster_bootstrap_ci
 
+    if getattr(args, "grid", False):
+        return _cmd_analyze_grid(args)
+
     paths = _paths(args)
     if not os.path.exists(paths["effects"]):
         raise FileNotFoundError(
@@ -346,6 +388,27 @@ def cmd_analyze(args) -> int:
     table.to_csv(paths["claims"], index=False)
     print(f"  {int(table['claimed'].sum())}/{len(table)} sites pass the claim gate "
           f"-> {paths['claims']}")
+    return 0
+
+
+def _cmd_analyze_grid(args) -> int:
+    """Offline analysis of the role x layer grid (§3.4, all four ingredients)."""
+    from .analysis import analyze_grid
+
+    paths = _paths(args)
+    for key in ("grid", "nulls"):
+        if not os.path.exists(paths[key]):
+            raise FileNotFoundError(
+                f"no grid artefact at {paths[key]}; run causal-patch --grid first")
+    grid = pd.read_parquet(paths["grid"])
+    nulls = pd.read_parquet(paths["nulls"])
+    table = analyze_grid(grid, nulls, n_boot=args.n_boot, n_perm=args.n_perm,
+                         q=args.q, seed=args.seed)
+    table.to_csv(paths["grid_claims"], index=False)
+    print(f"  {int(table['survives_fdr'].sum())}/{len(table)} cells survive BH "
+          f"(q={args.q}); {int(table['beats_random_site'].sum())} beat the matched "
+          f"random-site null; {int(table['exceeds_perm_threshold'].sum())} exceed the "
+          f"permutation max-statistic -> {paths['grid_claims']}")
     return 0
 
 

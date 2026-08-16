@@ -124,3 +124,43 @@ def test_hump_ranges_uses_60pct_rule():
     r = hump_ranges(y)
     # trough 0.1 at index 6; threshold 0.1+0.6*0.4=0.34 -> indices with y>=0.34
     assert r["hump1"] == (2, 4) and r["hump2"] == (8, 10)
+
+
+def _grid(n_layers=9, n_turns=20):
+    """Role x layer grid + matched random-site nulls (causal-patch --grid)."""
+    from codenames.causal.grid import GRID_ROLES
+    rows, nulls = [], []
+    for l in range(n_layers):
+        for t in range(n_turns):
+            for role in GRID_ROLES:
+                k = {"hint": 2, "cand_target": 1, "cand_donor": 1, "final": 1,
+                     "generation": 5, "p_read": 1, "scaffold": 4}[role]
+                e = np.nan if (role == "scaffold" and t % 5 == 0) else 0.3 + 0.02 * l + 0.01 * t
+                rows.append({"layer": l, "role": role, "n_positions": 0 if np.isnan(e) else k,
+                             "width": 1, "row_id": t, "effect": e})
+            for k in (1, 2, 4, 5):
+                nulls.append({"layer": l, "role": "random_site", "n_positions": k,
+                              "matched_n": k, "matched_roles": "x", "width": 1,
+                              "row_id": t, "effect": 0.02 + 0.001 * t})
+    return pd.DataFrame(rows), pd.DataFrame(nulls)
+
+
+def test_grid_curve_has_every_role_and_a_null_band():
+    from codenames.analysis.paper_figures import grid_curve
+    from codenames.causal.grid import GRID_ROLES
+    grid, nulls = _grid()
+    cur, null = grid_curve(grid, nulls, width=1, n_boot=50, seed=1)
+    assert set(cur["role"]) == set(GRID_ROLES)
+    assert len(cur) == 9 * len(GRID_ROLES)
+    assert set(null.columns) >= {"layer", "e", "lo", "hi"} and len(null) == 9
+    sc = cur[cur["role"] == "scaffold"]
+    assert (sc["n"] == 16).all()   # NaN cells dropped, count reported honestly
+
+
+def test_fig_causal_with_grid_runs(tmp_path):
+    from codenames.analysis.paper_figures import fig_causal
+    scan = np.random.default_rng(0).random((9, 10))
+    grid, nulls = _grid()
+    out = fig_causal({"mistral": (scan, _effects())}, _conc(), {"mistral": 6},
+                     out_path=tmp_path / "F4g.pdf", grids={"mistral": (grid, nulls)})
+    assert out.exists() and out.stat().st_size > 0

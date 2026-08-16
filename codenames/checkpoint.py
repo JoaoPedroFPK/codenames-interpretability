@@ -41,12 +41,14 @@ import pandas as pd
 # byte-identically alongside the data streams.
 # "patch" carries causal-tier per-turn effects; causal-patch is ~94% of the
 # compute budget, so it checkpoints through the same machinery as the main loop.
-RECORD_STREAMS = ("general", "generation", "vectors", "errors", "patch")
+# "grid"/"nulls" carry the role x layer grid and its matched random-site null.
+RECORD_STREAMS = ("general", "generation", "vectors", "errors", "patch", "grid", "nulls")
 # The metrics stream is checkpointed as parquet shards.
 METRICS_STREAM = "metrics"
 
 _EXT = {"metrics": "parquet", "general": "pkl", "generation": "pkl",
-        "vectors": "pkl", "errors": "pkl", "patch": "pkl"}
+        "vectors": "pkl", "errors": "pkl", "patch": "pkl", "grid": "pkl",
+        "nulls": "pkl"}
 
 
 def ckpt_path(base_dir: str, prefix: str, stream: str, mode: str, idx: int) -> str:

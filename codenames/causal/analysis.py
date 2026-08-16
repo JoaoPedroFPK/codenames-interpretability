@@ -113,3 +113,102 @@ def claim_gate(locus: Dict[str, bool]) -> bool:
         and locus.get("stable_across_orderings", False)
         and locus.get("confirmed_real_patch", False)
     )
+
+
+def bootstrap_means(values: Sequence[float], *, n_boot: int = 10000,
+                    seed: int = 2026) -> np.ndarray:
+    """Bootstrap distribution of the mean when each turn contributes ONE value.
+
+    That is the shape of the role x layer grid (one row per turn per cell), so
+    resampling values IS resampling turns and the loop in
+    ``cluster_bootstrap_ci`` can be vectorised.
+    """
+    v = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, v.size, size=(n_boot, v.size))
+    return v[idx].mean(axis=1)
+
+
+def bootstrap_p_two_sided(boot_means: np.ndarray) -> float:
+    """Percentile-bootstrap two-sided p-value for H0: mean == 0."""
+    b = np.asarray(boot_means, dtype=float)
+    if b.size == 0:
+        return float("nan")
+    lower = float(np.mean(b <= 0.0))
+    upper = float(np.mean(b >= 0.0))
+    return float(min(1.0, 2.0 * min(lower, upper)))
+
+
+def analyze_grid(grid, nulls, *, n_boot: int = 10000, n_perm: int = 1000,
+                 q: float = 0.05, seed: int = 2026, alpha: float = 0.05):
+    """Per-cell table for the role x layer grid (§3.4).
+
+    Columns: mean effect with a turn-bootstrap CI and a REAL two-sided
+    bootstrap p-value; BH across all cells; the paired contrast against the
+    random-site null matched on token count (join on ``row_id`` and
+    ``n_positions == matched_n``); and the sign-flip permutation
+    max-statistic threshold per width (family-wise, conservative cross-check).
+    """
+    import pandas as pd
+
+    grid = grid.copy()
+    nulls = nulls.copy()
+    key = ["row_id", "layer", "width"]
+    null_lookup = nulls.rename(columns={"effect": "null_effect"})[
+        key + ["matched_n", "null_effect"]]
+    merged = grid.merge(null_lookup, how="left", left_on=key + ["n_positions"],
+                        right_on=key + ["matched_n"])
+
+    rows = []
+    for (layer, role, width), block in merged.groupby(["layer", "role", "width"]):
+        e = block["effect"].to_numpy(dtype=float)
+        finite = np.isfinite(e)
+        if not finite.any():
+            rows.append({"layer": int(layer), "role": str(role), "width": int(width),
+                         "n_turns": 0, "mean_effect": np.nan, "ci_low": np.nan,
+                         "ci_high": np.nan, "p_boot": np.nan,
+                         "n_paired": 0, "random_site_mean": np.nan, "paired_diff": np.nan,
+                         "paired_ci_low": np.nan, "paired_ci_high": np.nan,
+                         "beats_random_site": False})
+            continue
+        boot = bootstrap_means(e[finite], n_boot=n_boot, seed=seed)
+        row = {"layer": int(layer), "role": str(role), "width": int(width),
+               "n_turns": int(finite.sum()), "mean_effect": float(e[finite].mean()),
+               "ci_low": float(np.quantile(boot, alpha / 2)),
+               "ci_high": float(np.quantile(boot, 1 - alpha / 2)),
+               "p_boot": bootstrap_p_two_sided(boot)}
+        null_e = block["null_effect"].to_numpy(dtype=float)
+        paired = finite & np.isfinite(null_e)
+        if paired.any():
+            diff = e[paired] - null_e[paired]
+            pboot = bootstrap_means(diff, n_boot=n_boot, seed=seed)
+            lo, hi = float(np.quantile(pboot, alpha / 2)), float(np.quantile(pboot, 1 - alpha / 2))
+            row.update({"n_paired": int(paired.sum()),
+                        "random_site_mean": float(null_e[paired].mean()),
+                        "paired_diff": float(diff.mean()),
+                        "paired_ci_low": lo, "paired_ci_high": hi,
+                        "beats_random_site": bool(lo > 0)})
+        else:
+            row.update({"n_paired": 0, "random_site_mean": np.nan, "paired_diff": np.nan,
+                        "paired_ci_low": np.nan, "paired_ci_high": np.nan,
+                        "beats_random_site": False})
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+
+    tested = table["p_boot"].notna()
+    table["survives_fdr"] = False
+    table.loc[tested, "survives_fdr"] = benjamini_hochberg(table.loc[tested, "p_boot"], q=q)
+
+    # Permutation max-statistic per width over the (turn x cell) matrix.
+    table["perm_threshold"] = np.nan
+    for width, block in grid.groupby("width"):
+        wide = block.pivot_table(index="row_id", columns=["layer", "role"],
+                                 values="effect", aggfunc="first")
+        thr = permutation_max_null(wide.to_numpy(dtype=float), wide.index.to_numpy(),
+                                   n_perm=n_perm, seed=seed, alpha=alpha)
+        table.loc[table["width"] == width, "perm_threshold"] = thr
+    table["exceeds_perm_threshold"] = (
+        table["mean_effect"].abs() > table["perm_threshold"]).fillna(False)
+    return table.sort_values(["width", "layer", "role"]).reset_index(drop=True)

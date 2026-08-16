@@ -284,11 +284,15 @@ from ..causal.basis import ROLES  # noqa: E402  (role order of the scan grid)
 from ..viz.style import OKABE_ITO  # noqa: E402
 
 ROLE_STYLE = {
-    "hint":       {"label": "hint span",         "color": OKABE_ITO["bluish_green"], "marker": "o"},
-    "cand_donor": {"label": "candidate (donor)", "color": OKABE_ITO["orange"],       "marker": "s"},
-    "generation": {"label": "answer positions",  "color": OKABE_ITO["reddish_purple"], "marker": "D"},
-    "final":      {"label": "generating position", "color": OKABE_ITO["blue"],       "marker": "^"},
+    "hint":        {"label": "hint span",           "color": OKABE_ITO["bluish_green"],   "marker": "o"},
+    "cand_target": {"label": "candidate (target)",  "color": OKABE_ITO["sky_blue"],       "marker": "v"},
+    "cand_donor":  {"label": "candidate (donor)",   "color": OKABE_ITO["orange"],         "marker": "s"},
+    "generation":  {"label": "answer positions",    "color": OKABE_ITO["reddish_purple"], "marker": "D"},
+    "scaffold":    {"label": "answer scaffold (before $p_{read}$)", "color": OKABE_ITO["vermillion"], "marker": "P"},
+    "p_read":      {"label": "$p_{read}$ alone",    "color": OKABE_ITO["yellow"],         "marker": "X"},
+    "final":       {"label": "generating position", "color": OKABE_ITO["blue"],           "marker": "^"},
 }
+NULL_STYLE = {"label": "random site (matched count)", "color": "#888888"}
 
 
 def confirmatory_curve(effects: pd.DataFrame, *, width: int = 1, n_boot: int = 2000,
@@ -311,18 +315,49 @@ def confirmatory_curve(effects: pd.DataFrame, *, width: int = 1, n_boot: int = 2
     return pd.DataFrame(rows).sort_values(["layer", "role"]).reset_index(drop=True)
 
 
+def grid_curve(grid: pd.DataFrame, nulls: pd.DataFrame, *, width: int = 1,
+               n_boot: int = 2000, seed: int = 2026) -> tuple:
+    """``(curve, null_band)`` for the role x layer grid (``causal-patch --grid``).
+
+    ``curve`` is ``confirmatory_curve`` over every grid role; ``null_band`` is
+    the per-layer mean of the matched random-site null pooled over token
+    counts (one value per turn: the mean over that turn's null draws), with a
+    turn-bootstrap CI. NaN cells (roles absent from a turn) are dropped and the
+    surviving count ``n`` reported.
+    """
+    curve = confirmatory_curve(grid, width=width, n_boot=n_boot, seed=seed)
+    rng = np.random.default_rng(seed)
+    d = nulls[(nulls["width"] == width) & np.isfinite(nulls["effect"])]
+    rows = []
+    for layer, g in d.groupby("layer"):
+        per_turn = g.groupby("row_id")["effect"].mean().to_numpy(dtype=float)
+        n = len(per_turn)
+        idx = rng.integers(0, n, (n_boot, n))
+        boot = per_turn[idx].mean(axis=1)
+        rows.append({"layer": int(layer), "n": n, "e": float(per_turn.mean()),
+                     "lo": float(np.percentile(boot, 2.5)),
+                     "hi": float(np.percentile(boot, 97.5))})
+    return curve, pd.DataFrame(rows).sort_values("layer").reset_index(drop=True)
+
+
 def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
                emergence: Dict[str, int], *, out_path: os.PathLike,
                scan_clip: float = 1.5, pooling: str = "mean",
-               condition: str = "no_social") -> Path:
+               condition: str = "no_social",
+               grids: Optional[Dict[str, tuple]] = None) -> Path:
     """Per model, two panels: (left) the attribution scan over layer x role,
-    clipped at ``scan_clip`` (screening only); (right) real-patch effects of
-    the top-scan site per layer, by role, with cluster-bootstrap CIs, the two
-    geometric humps as grey bands and the lens emergence depth dash-dotted.
+    clipped at ``scan_clip`` (screening only); (right) real-patch effects by
+    role with cluster-bootstrap CIs, the two geometric humps as grey bands and
+    the lens emergence depth dash-dotted.
 
     ``per_model`` maps model key -> (scan grid ndarray[layers, roles], effects
-    DataFrame with columns layer, role, width, row_id, effect).
+    DataFrame with columns layer, role, width, row_id, effect). When ``grids``
+    supplies ``(grid, nulls)`` for a model, the right panel shows the FULL
+    role x layer grid (every role at every layer, no untested cells) with the
+    matched random-site null as a grey band, instead of the top-scan-site
+    effects.
     """
+    grids = grids or {}
     plt = _paper_fig((PAPER_W, 2.15 * len(per_model)))
     n = len(per_model)
     fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.15 * n), squeeze=False,
@@ -352,7 +387,11 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         cb.set_label(f"first-order score (clipped at {scan_clip:g})", fontsize=5.5)
         _letter(ax_h, next(letters))
         # confirmatory curve ------------------------------------------------
-        cur = confirmatory_curve(effects, width=1)
+        null_band = None
+        if m in grids:
+            cur, null_band = grid_curve(grids[m][0], grids[m][1], width=1)
+        else:
+            cur = confirmatory_curve(effects, width=1)
         g = conc[conc["model"] == m].sort_values("layer")
         if not g.empty:
             rng_ = hump_ranges(g["top1_accuracy"].to_numpy())
@@ -381,15 +420,22 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
                 if xs[i + 1] - xs[i] == 1:
                     ax_c.plot(xs[i:i + 2], ys[i:i + 2], color=st["color"], lw=0.8,
                               alpha=0.6, zorder=2)
+        if null_band is not None and not null_band.empty:
+            ax_c.fill_between(null_band["layer"], null_band["lo"], null_band["hi"],
+                              color=NULL_STYLE["color"], alpha=0.25, lw=0, zorder=1)
+            ax_c.plot(null_band["layer"], null_band["e"], color=NULL_STYLE["color"],
+                      lw=0.8, ls="--", label=NULL_STYLE["label"], zorder=2)
         ax_c.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
         ax_c.axhline(1, lw=0.5, color="#bbbbbb", ls=":", zorder=0)
         ax_c.set_xlabel("Layer")
         ax_c.set_ylabel("Normalised patch effect $e$")
         ax_c.set_ylim(-0.1, 1.1)
         ax_c.set_xlim(-0.5, int(cur["layer"].max()) + 0.5)
-        ax_c.set_title(f"{s['label']}: real patches at the top-scan site per layer",
-                       fontsize=6, pad=2, loc="right")
-        ax_c.legend(fontsize=5.5, frameon=False, loc="center right")
+        title = ("real patches, every role at every layer" if m in grids
+                 else "real patches at the top-scan site per layer")
+        ax_c.set_title(f"{s['label']}: {title}", fontsize=6, pad=2, loc="right")
+        ax_c.legend(fontsize=5, frameon=False, loc="center right",
+                    ncol=2 if m in grids else 1)
         _letter(ax_c, next(letters))
     fig.tight_layout()
     out = Path(out_path)
@@ -509,6 +555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="model=layer pairs for the lens emergence marker")
     ap.add_argument("--pooling", default="mean")
     ap.add_argument("--condition", default="no_social")
+    ap.add_argument("--no-grid", action="store_true",
+                    help="--fig causal: ignore the role x layer grid even if present")
     a = ap.parse_args(argv)
     if a.fig == "geometry":
         out = fig_geometry(
@@ -526,17 +574,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             out_path=a.out, pooling=a.pooling, condition=a.condition)
         print(f"wrote {out}")
     elif a.fig == "causal":
-        per_model = {}
+        per_model, grids = {}, {}
         for m in a.models.split(","):
-            scan = np.load(os.path.join("output", f"{m}_outputs",
-                                        f"{m}_causal_scan_counterfactual_{a.condition}.npy"))
-            eff = pd.read_parquet(os.path.join("output", f"{m}_outputs",
-                                               f"{m}_causal_effects_counterfactual_{a.condition}.parquet"))
+            base = os.path.join("output", f"{m}_outputs")
+            scan = np.load(os.path.join(base, f"{m}_causal_scan_counterfactual_{a.condition}.npy"))
+            eff = pd.read_parquet(os.path.join(
+                base, f"{m}_causal_effects_counterfactual_{a.condition}.parquet"))
             per_model[m] = (scan, eff)
+            g = os.path.join(base, f"{m}_causal_effects_grid_counterfactual_{a.condition}.parquet")
+            nl = os.path.join(base, f"{m}_causal_nulls_counterfactual_{a.condition}.parquet")
+            if not a.no_grid and os.path.exists(g) and os.path.exists(nl):
+                grids[m] = (pd.read_parquet(g), pd.read_parquet(nl))
         emergence = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in a.emergence.split(",") if kv}
         out = fig_causal(per_model,
                          _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
-                         emergence, out_path=a.out, pooling=a.pooling, condition=a.condition)
+                         emergence, out_path=a.out, pooling=a.pooling, condition=a.condition,
+                         grids=grids)
         print(f"wrote {out}")
     elif a.fig == "triangulation":
         effects = {}

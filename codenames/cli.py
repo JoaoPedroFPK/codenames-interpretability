@@ -1699,6 +1699,23 @@ def _make_causal_patch_parser(sp) -> argparse.ArgumentParser:
                    help="This model has no recorded generations (the "
                         "random-init null); measure at the generating position.")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--grid", action="store_true",
+                   help="Patch EVERY listed role at EVERY listed layer on the "
+                        "confirmatory draw, independent of the scan loci, and "
+                        "run the matched random-site null (spec §3.3.1) on the "
+                        "same turns. Writes the _effects_grid_ and _nulls_ "
+                        "parquets; never overwrites the scan-locus _effects_.")
+    p.add_argument("--roles", default="all",
+                   help="--grid only: comma list of roles, or 'all' = "
+                        "hint,cand_target,cand_donor,final,generation,p_read,"
+                        "scaffold.")
+    p.add_argument("--layers", default="all",
+                   help="--grid only: comma list of cached layer indices "
+                        "(0 = embeddings), or 'all'.")
+    p.add_argument("--batch-size", type=int, default=1,
+                   help="--grid only: site sets patched per forward. 1 is the "
+                        "reference path; >1 is an acceleration and may drift "
+                        "at the kernel level like every other one.")
     return p
 
 
@@ -1767,6 +1784,13 @@ def _make_causal_analyze_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--n-boot", type=int, default=10000)
     p.add_argument("--n-perm", type=int, default=1000)
     p.add_argument("--figures", action="store_true")
+    p.add_argument("--grid", action="store_true",
+                   help="Analyse the role x layer grid (_effects_grid_ + "
+                        "_nulls_) instead of the scan-locus effects: real "
+                        "cluster-bootstrap p-values, BH over cells, paired "
+                        "contrast against the matched random-site null, and "
+                        "the sign-flip permutation max-statistic threshold.")
+    p.add_argument("--scheme", default="counterfactual", choices=list(_CAUSAL_SCHEMES))
     return p
 
 
