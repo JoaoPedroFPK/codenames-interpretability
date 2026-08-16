@@ -352,7 +352,8 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
                emergence: Dict[str, int], *, out_path: os.PathLike,
                scan_clip: float = 1.5, pooling: str = "mean",
                condition: str = "no_social",
-               grids: Optional[Dict[str, tuple]] = None) -> Path:
+               grids: Optional[Dict[str, tuple]] = None,
+               direction: str = "denoise") -> Path:
     """Per model, two panels: (left) the attribution scan over layer x role,
     clipped at ``scan_clip`` (screening only); (right) real-patch effects by
     role with cluster-bootstrap CIs, the two geometric humps as grey bands and
@@ -436,10 +437,12 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         ax_c.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
         ax_c.axhline(1, lw=0.5, color="#bbbbbb", ls=":", zorder=0)
         ax_c.set_xlabel("Layer")
-        ax_c.set_ylabel("Normalised patch effect $e$")
+        ax_c.set_ylabel("Share of answer destroyed $e_{nec}$" if direction == "noise"
+                        else "Normalised patch effect $e$")
         ax_c.set_ylim(-0.1, 1.1)
         ax_c.set_xlim(-0.5, int(cur["layer"].max()) + 0.5)
-        title = ("real patches, every role at every layer" if m in grids
+        what = "necessity (corrupt$\\to$clean)" if direction == "noise" else "real patches"
+        title = (f"{what}, every role at every layer" if m in grids
                  else "real patches at the top-scan site per layer")
         ax_c.set_title(f"{s['label']}: {title}", fontsize=6, pad=2, loc="right")
         ax_c.legend(fontsize=5, frameon=False, loc="best", ncol=2 if m in grids else 1)
@@ -574,6 +577,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--condition", default="no_social")
     ap.add_argument("--no-grid", action="store_true",
                     help="--fig causal: ignore the role x layer grid even if present")
+    ap.add_argument("--grid-direction", default="denoise", choices=("denoise", "noise"),
+                    help="--fig causal: which grid to draw (sufficiency / necessity)")
     a = ap.parse_args(argv)
     if a.fig == "geometry":
         out = fig_geometry(
@@ -600,15 +605,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             eff = pd.read_parquet(os.path.join(
                 base, f"{m}_causal_effects_counterfactual_{a.condition}.parquet"))
             per_model[m] = (scan, eff)
-            g = os.path.join(base, f"{m}_causal_effects_grid_counterfactual_{a.condition}.parquet")
-            nl = os.path.join(base, f"{m}_causal_nulls_counterfactual_{a.condition}.parquet")
+            dsuf = "" if a.grid_direction == "denoise" else f"_{a.grid_direction}"
+            g = os.path.join(base, f"{m}_causal_effects_grid_counterfactual_{a.condition}{dsuf}.parquet")
+            nl = os.path.join(base, f"{m}_causal_nulls_counterfactual_{a.condition}{dsuf}.parquet")
             if not a.no_grid and os.path.exists(g) and os.path.exists(nl):
                 grids[m] = (pd.read_parquet(g), pd.read_parquet(nl))
         emergence = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in a.emergence.split(",") if kv}
         out = fig_causal(per_model,
                          _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
                          emergence, out_path=a.out, pooling=a.pooling, condition=a.condition,
-                         grids=grids)
+                         grids=grids, direction=a.grid_direction)
         print(f"wrote {out}")
     elif a.fig == "triangulation":
         effects = {}
