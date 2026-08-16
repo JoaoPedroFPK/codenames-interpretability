@@ -81,12 +81,12 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
     ``panels="ab"`` renders the one-row main-text version.
     """
     two_rows = panels == "abcd"
-    plt = _paper_fig((PAPER_W, 4.6 if two_rows else 2.4))
+    plt = _paper_fig((PAPER_W, 4.6 if two_rows else 2.15))
     if two_rows:
         fig, axes = plt.subplots(2, 2, figsize=(PAPER_W, 4.6))
         ax_a, ax_b, ax_c, ax_d = axes.ravel()
     else:
-        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(PAPER_W, 2.4))
+        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(PAPER_W, 2.15))
         ax_c = ax_d = None
 
     # (a) geometric top-1 for the decoders + null --------------------------
@@ -391,8 +391,8 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
     output are annotated from g(l). Models without patching data show the two
     correlational curves only.
     """
-    plt = _paper_fig((PAPER_W, 2.3))
-    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.3), sharey=True)
+    plt = _paper_fig((PAPER_W, 2.15))
+    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.15), sharey=True)
     axes = np.atleast_1d(axes)
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
