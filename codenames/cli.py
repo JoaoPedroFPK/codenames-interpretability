@@ -58,6 +58,8 @@ MODEL_REGISTRY: Dict[str, Tuple[str, str]] = {
 
 # Trained causal decoders that accept attn_implementation='flash_attention_2'.
 _FLASH_ATTN_MODELS = ("mistral", "qwen", "mistral_base", "qwen_base", "llama")
+# Random-init controls: loaders take random_seed (the weight seed).
+_RANDOM_INIT_MODELS = ("qwen_random", "bert_random")
 
 
 def _resolve_loader(model_name: str) -> Callable:
@@ -114,6 +116,11 @@ def _make_run_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParse
                         "committed to checkpoints (per the manifest) and reuse a completed "
                         "condition's outputs. Byte-identical to an uninterrupted run. "
                         "Without this flag, stale checkpoints in --output-dir are wiped.")
+    p.add_argument("--init-seed", type=int, default=None,
+                   help="Random-init controls only (qwen_random, bert_random): "
+                        "the WEIGHT-initialisation seed. Outputs get the prefix "
+                        "suffix _s<seed>; the contract seed 2026 still governs "
+                        "sampling, shuffles and bootstrap.")
     p.add_argument("--reuse-canonical", action="store_true",
                    help="Reuse per-board canonical (permutation_id=0) results from a "
                         "persistent row_id cache in --output-dir, and write newly-computed "
@@ -274,7 +281,7 @@ def _make_visualize_parser(sp: "argparse._SubParsersAction") -> argparse.Argumen
     return p
 
 
-_AGGREGATE_STEPS = ("tables", "concordance", "boards", "trust", "figures", "examples")
+_AGGREGATE_STEPS = ("tables", "concordance", "boards", "trust", "figures", "examples", "seeds")
 
 
 def _make_aggregate_parser(sp: "argparse._SubParsersAction") -> argparse.ArgumentParser:
@@ -355,6 +362,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     import dataclasses
 
     loader = _resolve_loader(args.model)
+    init_seed = getattr(args, "init_seed", None)
+    if init_seed is not None and args.model not in _RANDOM_INIT_MODELS:
+        raise SystemExit(f"--init-seed applies only to the random-init controls "
+                         f"({', '.join(_RANDOM_INIT_MODELS)}), not {args.model!r}.")
 
     # Load the dataset first so --full can resolve against the real row count.
     df = load_dataset(args.dataset)
@@ -386,6 +397,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if acceleration.flash_attention_for_causal and args.model in _FLASH_ATTN_MODELS:
         print(f"Loading model with attn_implementation='flash_attention_2'")
         model, tokenizer, meta = loader(attn_implementation="flash_attention_2")
+    elif init_seed is not None:
+        model, tokenizer, meta = loader(random_seed=int(init_seed))
+        # A second seed is a second control run: keep it apart from the
+        # seed-2026 artefacts every table already reads.
+        meta = {**meta, "prefix": f"{meta['prefix']}_s{int(init_seed)}"}
+        print(f"Random-init seed {init_seed}: outputs use prefix {meta['prefix']!r}")
     else:
         model, tokenizer, meta = loader()
 
@@ -894,6 +911,16 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
             n_boot=args.n_boot, seed=args.seed,
             include_concordance_by_layer=("concordance" in steps),
         )
+
+    if "seeds" in steps:
+        from .analysis import tables as agg_tables
+
+        print("[aggregate] random-init controls across weight seeds")
+        spread = agg_tables.random_init_seed_spread(args.output_dir)
+        os.makedirs(analysis_dir, exist_ok=True)
+        path = os.path.join(analysis_dir, "analysis_random_init_seeds.csv")
+        spread.to_csv(path, index=False)
+        print(f"  {len(spread)} (control, seed) rows -> {path}")
 
     if "boards" in steps:
         from .analysis import boards as agg_boards

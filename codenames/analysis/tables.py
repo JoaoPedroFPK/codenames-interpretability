@@ -416,3 +416,49 @@ def build_all(
         for m in missing:
             print(f"    - {m}")
     return written
+
+
+def random_init_seed_spread(
+    output_dir: str,
+    base_prefixes=("random_qwen", "random_bert"),
+    seeds=(2026, 2027, 2028),
+    condition: str = "no_social",
+    pooling: str = "mean",
+) -> pd.DataFrame:
+    """Per (control, weight seed): the primacy rho profile and the margin.
+
+    Seed 2026 is the run under the bare prefix (``random_qwen``); every other
+    seed is under ``{prefix}_s{seed}`` (``run --init-seed``). Reads the SC5/SC7
+    per-layer CSVs each run writes and reports the peak |rho| (with its
+    layer), the final-layer rho, and the max / final mean margin, so the
+    spread across seeds can be quoted where the paper says "single seed".
+    Missing runs are skipped, never zero-filled.
+    """
+    rows = []
+    for base in base_prefixes:
+        for seed in seeds:
+            prefix = base if seed == seeds[0] else f"{base}_s{seed}"
+            d = _model_dir(output_dir, prefix)
+            rho_path = os.path.join(d, f"{prefix}_position_confound_by_layer.csv")
+            mg_path = os.path.join(d, f"{prefix}_layer_margins_{pooling}_{condition}.csv")
+            if not (os.path.exists(rho_path) and os.path.exists(mg_path)):
+                continue
+            rho = pd.read_csv(rho_path).sort_values("layer")
+            mg = pd.read_csv(mg_path)
+            mg = mg[(mg["pooling_method"] == pooling) & (mg["condition"] == condition)] \
+                .sort_values("layer")
+            r = rho["mean_rho"].to_numpy(dtype=float)
+            m = mg["mean_margin"].to_numpy(dtype=float)
+            peak = int(np.nanargmax(np.abs(r))) if r.size else -1
+            rows.append({
+                "base_prefix": base, "seed": int(seed), "prefix": prefix,
+                "n_layers": int(len(r)),
+                "peak_abs_rho": float(np.abs(r[peak])) if r.size else np.nan,
+                "peak_rho_layer": int(rho["layer"].iloc[peak]) if r.size else -1,
+                "final_rho": float(r[-1]) if r.size else np.nan,
+                "max_margin": float(np.nanmax(m)) if m.size else np.nan,
+                "final_margin": float(m[-1]) if m.size else np.nan,
+            })
+    return pd.DataFrame(rows, columns=["base_prefix", "seed", "prefix", "n_layers",
+                                       "peak_abs_rho", "peak_rho_layer", "final_rho",
+                                       "max_margin", "final_margin"])
