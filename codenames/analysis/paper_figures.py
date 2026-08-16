@@ -60,6 +60,30 @@ def find_humps(y: np.ndarray) -> Dict[str, int]:
     return {"hump1": int(h1), "hump2": int(h2), "trough": trough}
 
 
+
+def hump_ranges(y: np.ndarray, frac: float = 0.6) -> Dict[str, tuple]:
+    """Contiguous layer ranges of the two humps: layers around each hump
+    maximum at which ``y`` exceeds the trough by at least ``frac`` of that
+    hump's height above the trough. Returns {'hump1': (lo, hi), 'hump2': (lo, hi)}
+    (inclusive), or None entries when a hump is absent."""
+    y = np.asarray(y, dtype=float)
+    h = find_humps(y)
+    if h["hump2"] is None or h["trough"] is None:
+        return {"hump1": None, "hump2": None}
+    trough = y[h["trough"]]
+    out = {}
+    for key in ("hump1", "hump2"):
+        pk = h[key]; thr = trough + frac * (y[pk] - trough)
+        lo = pk
+        while lo - 1 >= 0 and y[lo - 1] >= thr:
+            lo -= 1
+        hi = pk
+        while hi + 1 < len(y) and y[hi + 1] >= thr:
+            hi += 1
+        out[key] = (int(lo), int(hi))
+    return out
+
+
 def _mark_hump(ax, x: float, y: float, label: str, color: str, *, dy: float = 0.06) -> None:
     ax.plot([x], [y], marker="v", markersize=4.5, color=color, zorder=5,
             markeredgecolor="white", markeredgewidth=0.4)
@@ -331,13 +355,13 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         cur = confirmatory_curve(effects, width=1)
         g = conc[conc["model"] == m].sort_values("layer")
         if not g.empty:
-            h = find_humps(g["top1_accuracy"].to_numpy())
+            rng_ = hump_ranges(g["top1_accuracy"].to_numpy())
             for key in ("hump1", "hump2"):
-                i = h[key]
-                if i is not None:
-                    xl = int(g["layer"].iloc[i])
-                    ax_c.axvspan(xl - 1, xl + 1, color="#dddddd", lw=0, zorder=0)
-                    ax_c.annotate("cosine hump", (xl, 1.02), fontsize=5, ha="center",
+                r = rng_[key]
+                if r is not None:
+                    lo = int(g["layer"].iloc[r[0]]); hi = int(g["layer"].iloc[r[1]])
+                    ax_c.axvspan(lo - 0.5, hi + 0.5, color="#e4e4e4", lw=0, zorder=0)
+                    ax_c.annotate("cosine hump", ((lo + hi) / 2, 1.02), fontsize=5, ha="center",
                                   va="bottom", color="#666666")
         if m in emergence:
             ax_c.axvline(emergence[m], color=s["color"], lw=0.7, ls="-.", zorder=1)

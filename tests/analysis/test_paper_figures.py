@@ -116,3 +116,11 @@ def test_fig_triangulation_runs(tmp_path):
     out = fig_triangulation(_conc(), _lens_curves(), {"mistral": _effects()},
                             out_path=tmp_path / "F5.pdf")
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_hump_ranges_uses_60pct_rule():
+    from codenames.analysis.paper_figures import hump_ranges
+    y = np.array([0.2, 0.3, 0.45, 0.5, 0.45, 0.3, 0.1, 0.3, 0.45, 0.5, 0.45, 0.3, 0.2])
+    r = hump_ranges(y)
+    # trough 0.1 at index 6; threshold 0.1+0.6*0.4=0.34 -> indices with y>=0.34
+    assert r["hump1"] == (2, 4) and r["hump2"] == (8, 10)
