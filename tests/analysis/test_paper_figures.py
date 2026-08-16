@@ -81,3 +81,31 @@ def test_emergence_depth_is_first_layer_at_90pct_of_final():
     from codenames.analysis.paper_figures import emergence_depth
     y = np.array([0.1, 0.1, 0.2, 0.5, 0.66, 0.7, 0.7])
     assert emergence_depth(y) == 4
+
+
+def _effects(n_layers=9, n_turns=20):
+    rows = []
+    roles = ["hint"] * 4 + ["cand_donor"] * 2 + ["generation"] * 3
+    for l in range(n_layers):
+        for t in range(n_turns):
+            for w in (1, 3, 5):
+                rows.append({"layer": l, "role": roles[l], "n_positions": 2, "width": w,
+                             "row_id": t, "effect": 0.5 + 0.01 * t})
+    return pd.DataFrame(rows)
+
+
+def test_confirmatory_curve_has_ci_and_drops_nonfinite():
+    from codenames.analysis.paper_figures import confirmatory_curve
+    eff = _effects()
+    eff.loc[0, "effect"] = np.nan
+    cur = confirmatory_curve(eff, width=1, n_boot=50, seed=1)
+    assert set(cur.columns) >= {"layer", "role", "e", "lo", "hi", "n"}
+    assert len(cur) == 9 and (cur["lo"] <= cur["e"]).all() and (cur["e"] <= cur["hi"]).all()
+
+
+def test_fig_causal_runs(tmp_path):
+    from codenames.analysis.paper_figures import fig_causal
+    scan = np.random.default_rng(0).random((9, 10))
+    out = fig_causal({"mistral": (scan, _effects())}, _conc(), {"mistral": 6},
+                     out_path=tmp_path / "F4.pdf")
+    assert out.exists() and out.stat().st_size > 0

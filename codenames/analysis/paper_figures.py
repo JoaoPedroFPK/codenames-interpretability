@@ -243,6 +243,125 @@ def fig_lens(curves: pd.DataFrame, shuffle: pd.DataFrame, conc_by_layer: pd.Data
 
 
 # ---------------------------------------------------------------------------
+# F4 — patching: where the hint matters and where the answer forms
+# ---------------------------------------------------------------------------
+
+from ..causal.basis import ROLES  # noqa: E402  (role order of the scan grid)
+from ..viz.style import OKABE_ITO  # noqa: E402
+
+ROLE_STYLE = {
+    "hint":       {"label": "hint span",         "color": OKABE_ITO["bluish_green"], "marker": "o"},
+    "cand_donor": {"label": "candidate (donor)", "color": OKABE_ITO["orange"],       "marker": "s"},
+    "generation": {"label": "answer positions",  "color": OKABE_ITO["reddish_purple"], "marker": "D"},
+    "final":      {"label": "generating position", "color": OKABE_ITO["blue"],       "marker": "^"},
+}
+
+
+def confirmatory_curve(effects: pd.DataFrame, *, width: int = 1, n_boot: int = 2000,
+                       seed: int = 2026) -> pd.DataFrame:
+    """Per-(layer, role) mean normalised patch effect with a cluster bootstrap
+    over turns (95%). Non-finite effects (turns with a degenerate denominator
+    or a missing role) are dropped and the surviving count is reported."""
+    rng = np.random.default_rng(seed)
+    d = effects[(effects["width"] == width) & np.isfinite(effects["effect"])]
+    rows = []
+    for (layer, role), g in d.groupby(["layer", "role"]):
+        x = g["effect"].to_numpy(dtype=float)
+        n = len(x)
+        idx = rng.integers(0, n, (n_boot, n))
+        boot = x[idx].mean(axis=1)
+        rows.append({"layer": int(layer), "role": role, "n": n, "e": float(x.mean()),
+                     "median": float(np.median(x)),
+                     "lo": float(np.percentile(boot, 2.5)),
+                     "hi": float(np.percentile(boot, 97.5))})
+    return pd.DataFrame(rows).sort_values(["layer", "role"]).reset_index(drop=True)
+
+
+def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
+               emergence: Dict[str, int], *, out_path: os.PathLike,
+               scan_clip: float = 1.5, pooling: str = "mean",
+               condition: str = "no_social") -> Path:
+    """Per model, two panels: (left) the attribution scan over layer x role,
+    clipped at ``scan_clip`` (screening only); (right) real-patch effects of
+    the top-scan site per layer, by role, with cluster-bootstrap CIs, the two
+    geometric humps as grey bands and the lens emergence depth dash-dotted.
+
+    ``per_model`` maps model key -> (scan grid ndarray[layers, roles], effects
+    DataFrame with columns layer, role, width, row_id, effect).
+    """
+    plt = _paper_fig((PAPER_W, 2.6 * len(per_model)))
+    n = len(per_model)
+    fig, axes = plt.subplots(n, 2, figsize=(PAPER_W, 2.6 * n), squeeze=False,
+                             gridspec_kw={"width_ratios": [1.0, 1.6]})
+    conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
+                         & (conc_by_layer["condition"] == condition)]
+    letters = iter("abcdefgh")
+    for row, (m, (scan, effects)) in zip(axes, per_model.items()):
+        ax_h, ax_c = row
+        s = model_style(m)
+        # heatmap of the screening scan ------------------------------------
+        grid = np.clip(np.asarray(scan, dtype=float), 0, scan_clip)
+        shown = [i for i, r in enumerate(ROLES) if r not in ("prefix",)]
+        im = ax_h.imshow(grid[:, shown], aspect="auto", origin="lower",
+                         cmap="Blues", vmin=0, vmax=scan_clip)
+        ax_h.set_xticks(range(len(shown)))
+        ax_h.set_xticklabels([ROLES[i].replace("_", "\n") for i in shown],
+                             fontsize=5, rotation=90)
+        ax_h.set_ylabel("Layer")
+        ax_h.set_title("attribution scan (screening)", fontsize=6, pad=2, loc="right")
+        cb = fig.colorbar(im, ax=ax_h, fraction=0.05, pad=0.02)
+        cb.ax.tick_params(labelsize=5)
+        cb.set_label(f"first-order score (clipped at {scan_clip:g})", fontsize=5.5)
+        _letter(ax_h, next(letters))
+        # confirmatory curve ------------------------------------------------
+        cur = confirmatory_curve(effects, width=1)
+        g = conc[conc["model"] == m].sort_values("layer")
+        if not g.empty:
+            h = find_humps(g["top1_accuracy"].to_numpy())
+            for key in ("hump1", "hump2"):
+                i = h[key]
+                if i is not None:
+                    xl = int(g["layer"].iloc[i])
+                    ax_c.axvspan(xl - 1, xl + 1, color="#dddddd", lw=0, zorder=0)
+                    ax_c.annotate("cosine hump", (xl, 1.02), fontsize=5, ha="center",
+                                  va="bottom", color="#666666")
+        if m in emergence:
+            ax_c.axvline(emergence[m], color=s["color"], lw=0.7, ls="-.", zorder=1)
+            ax_c.annotate(f"lens emergence L{emergence[m]}", (emergence[m], -0.02),
+                          xytext=(3, 0), textcoords="offset points", fontsize=5,
+                          color=s["color"], ha="left", va="bottom")
+        for role, st in ROLE_STYLE.items():
+            c = cur[cur["role"] == role]
+            if c.empty:
+                continue
+            ax_c.errorbar(c["layer"], c["e"], yerr=[c["e"] - c["lo"], c["hi"] - c["e"]],
+                          fmt=st["marker"], color=st["color"], markersize=3, lw=0.9,
+                          capsize=1.5, label=st["label"], zorder=3)
+            # connect only consecutive tested layers; gaps stay gaps
+            xs = c["layer"].to_numpy(); ys = c["e"].to_numpy()
+            for i in range(len(xs) - 1):
+                if xs[i + 1] - xs[i] == 1:
+                    ax_c.plot(xs[i:i + 2], ys[i:i + 2], color=st["color"], lw=0.8,
+                              alpha=0.6, zorder=2)
+        ax_c.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
+        ax_c.axhline(1, lw=0.5, color="#bbbbbb", ls=":", zorder=0)
+        ax_c.set_xlabel("Layer")
+        ax_c.set_ylabel("Normalised patch effect $e$")
+        ax_c.set_ylim(-0.1, 1.1)
+        ax_c.set_xlim(-0.5, int(cur["layer"].max()) + 0.5)
+        ax_c.set_title(f"{s['label']}: real patches at the top-scan site per layer",
+                       fontsize=6, pad=2, loc="right")
+        ax_c.legend(fontsize=5.5, frameon=False, loc="center right")
+        _letter(ax_c, next(letters))
+    fig.tight_layout()
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -252,10 +371,13 @@ def _read(path: str) -> Optional[pd.DataFrame]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--fig", required=True, choices=("geometry", "lens"))
+    ap.add_argument("--fig", required=True, choices=("geometry", "lens", "causal"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--analysis-dir", default="output/analysis")
     ap.add_argument("--lens-dir", default="output/lens_analysis")
+    ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
+    ap.add_argument("--emergence", default="mistral=20,qwen=25",
+                    help="model=layer pairs for the lens emergence marker")
     ap.add_argument("--pooling", default="mean")
     ap.add_argument("--condition", default="no_social")
     a = ap.parse_args(argv)
@@ -273,6 +395,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _read(os.path.join(a.lens_dir, f"lens_shuffle_control_answer_{a.condition}.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
             out_path=a.out, pooling=a.pooling, condition=a.condition)
+        print(f"wrote {out}")
+    elif a.fig == "causal":
+        per_model = {}
+        for m in a.models.split(","):
+            scan = np.load(os.path.join("output", f"{m}_outputs",
+                                        f"{m}_causal_scan_counterfactual_{a.condition}.npy"))
+            eff = pd.read_parquet(os.path.join("output", f"{m}_outputs",
+                                               f"{m}_causal_effects_counterfactual_{a.condition}.parquet"))
+            per_model[m] = (scan, eff)
+        emergence = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in a.emergence.split(",") if kv}
+        out = fig_causal(per_model,
+                         _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
+                         emergence, out_path=a.out, pooling=a.pooling, condition=a.condition)
         print(f"wrote {out}")
     return 0
 
