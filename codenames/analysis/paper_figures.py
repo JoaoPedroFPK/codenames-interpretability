@@ -362,6 +362,77 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
+# F5 — triangulation overlay
+# ---------------------------------------------------------------------------
+
+def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
+                      effects_by_model: Dict[str, pd.DataFrame], *,
+                      out_path: os.PathLike, models: Sequence[str] = DECODERS,
+                      pooling: str = "mean", condition: str = "no_social") -> Path:
+    """One panel per decoder on an absolute layer axis: cosine g(l) (grey), raw
+    lens L(l) at p_read (model colour), and the real patch effects for the hint
+    span and the answer positions (role colours). Hump 1, trough, hump 2 and the
+    output are annotated from g(l). Models without patching data show the two
+    correlational curves only.
+    """
+    plt = _paper_fig((PAPER_W, 2.5))
+    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.5), sharey=True)
+    axes = np.atleast_1d(axes)
+    conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
+                         & (conc_by_layer["condition"] == condition)]
+    for ax, m, letter in zip(axes, models, "abcdefg"):
+        s = model_style(m)
+        g = conc[conc["model"] == m].sort_values("layer")
+        if not g.empty:
+            gx = g["layer"].to_numpy(); gy = g["top1_accuracy"].to_numpy()
+            ax.plot(gx, gy, color="#9a9a9a", lw=1.1, marker="o", markersize=1.8,
+                    label="cosine $g(\\ell)$", zorder=2)
+            h = find_humps(gy)
+            marks = [("hump 1", h["hump1"]), ("trough", h["trough"]),
+                     ("hump 2", h["hump2"]), ("output", len(gy) - 1)]
+            for name, i in marks:
+                if i is None:
+                    continue
+                ax.annotate(name, (gx[i], gy[i]), xytext=(0, 6),
+                            textcoords="offset points", ha="center", va="bottom",
+                            fontsize=5.2, color="#666666", zorder=6)
+                ax.plot([gx[i]], [gy[i]], marker="v", markersize=3.5, color="#9a9a9a",
+                        markeredgecolor="white", markeredgewidth=0.4, zorder=4)
+        L = lens_curves[(lens_curves["model"] == m) & (lens_curves["lens"] == "raw")].sort_values("layer")
+        if not L.empty:
+            ax.plot(L["layer"], L["top1"], color=s["color"], lw=1.2, marker=s["marker"],
+                    markersize=2.0, label="lens $L(\\ell)$ at $p_{read}$", zorder=3)
+        eff = effects_by_model.get(m)
+        if eff is not None:
+            cur = confirmatory_curve(eff, width=1)
+            for role in ("hint", "generation"):
+                c = cur[cur["role"] == role]
+                if c.empty:
+                    continue
+                st = ROLE_STYLE[role]
+                ax.errorbar(c["layer"], c["e"], yerr=[c["e"] - c["lo"], c["hi"] - c["e"]],
+                            fmt=st["marker"], color=st["color"], markersize=2.8, lw=0.8,
+                            capsize=1.2, label=f"patch $e$: {st['label']}", zorder=3)
+        else:
+            ax.text(0.5, 0.92, "patching: pending", transform=ax.transAxes, ha="center",
+                    fontsize=6, color="#888888")
+        ax.set_title(s["label"], fontsize=7, pad=2)
+        ax.set_xlabel("Layer")
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(-0.5, (int(g["layer"].max()) if not g.empty else 32) + 0.5)
+        _letter(ax, letter)
+    axes[0].set_ylabel("top-1 fraction / patch effect $e$")
+    handles, labels = axes[0].get_legend_handles_labels()
+    _top_legend(fig, handles, ncol=4)
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -371,7 +442,7 @@ def _read(path: str) -> Optional[pd.DataFrame]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--fig", required=True, choices=("geometry", "lens", "causal"))
+    ap.add_argument("--fig", required=True, choices=("geometry", "lens", "causal", "triangulation"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--analysis-dir", default="output/analysis")
     ap.add_argument("--lens-dir", default="output/lens_analysis")
@@ -408,6 +479,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out = fig_causal(per_model,
                          _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
                          emergence, out_path=a.out, pooling=a.pooling, condition=a.condition)
+        print(f"wrote {out}")
+    elif a.fig == "triangulation":
+        effects = {}
+        for m in a.models.split(","):
+            pq = os.path.join("output", f"{m}_outputs",
+                              f"{m}_causal_effects_counterfactual_{a.condition}.parquet")
+            if os.path.exists(pq):
+                effects[m] = pd.read_parquet(pq)
+        out = fig_triangulation(
+            _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
+            _read(os.path.join(a.lens_dir, f"lens_curves_answer_{a.condition}.csv")),
+            effects, out_path=a.out, pooling=a.pooling, condition=a.condition)
         print(f"wrote {out}")
     return 0
 

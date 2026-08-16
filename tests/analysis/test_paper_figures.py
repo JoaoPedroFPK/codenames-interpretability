@@ -109,3 +109,10 @@ def test_fig_causal_runs(tmp_path):
     out = fig_causal({"mistral": (scan, _effects())}, _conc(), {"mistral": 6},
                      out_path=tmp_path / "F4.pdf")
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_fig_triangulation_runs(tmp_path):
+    from codenames.analysis.paper_figures import fig_triangulation
+    out = fig_triangulation(_conc(), _lens_curves(), {"mistral": _effects()},
+                            out_path=tmp_path / "F5.pdf")
+    assert out.exists() and out.stat().st_size > 0
