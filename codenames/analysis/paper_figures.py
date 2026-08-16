@@ -149,6 +149,99 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
     return out
 
 
+def emergence_depth(y: np.ndarray, frac: float = 0.9) -> int:
+    """First layer index at which ``y`` reaches ``frac`` of its final value
+    (the lens spec's emergence-depth rule)."""
+    y = np.asarray(y, dtype=float)
+    thr = frac * y[-1]
+    hits = np.flatnonzero(y >= thr)
+    return int(hits[0]) if len(hits) else int(len(y) - 1)
+
+
+# ---------------------------------------------------------------------------
+# F3 — lens: only the second hump decodes the answer
+# ---------------------------------------------------------------------------
+
+_LENS_LS = {"raw": "-", "tuned": "--"}
+
+
+def fig_lens(curves: pd.DataFrame, shuffle: pd.DataFrame, conc_by_layer: pd.DataFrame, *,
+             out_path: os.PathLike, models: Sequence[str] = DECODERS,
+             null_model: str = DECODER_NULL, pooling: str = "mean",
+             condition: str = "no_social") -> Path:
+    """One panel per decoder, absolute layer axis: candidate-restricted lens
+    top-1 at p_read (raw solid, tuned dashed, CI bands), the geometric curve
+    g(l) in grey behind, the random-init and shuffled-label nulls as flat bands,
+    and the raw-lens emergence depth marked.
+    """
+    plt = _paper_fig((PAPER_W, 2.5))
+    fig, axes = plt.subplots(1, len(models), figsize=(PAPER_W, 2.5), sharey=True)
+    axes = np.atleast_1d(axes)
+    conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
+                         & (conc_by_layer["condition"] == condition)]
+    null = curves[(curves["model"] == null_model) & (curves["lens"] == "raw")]
+    for ax, m, letter in zip(axes, models, "abcdefg"):
+        s = model_style(m)
+        g = conc[conc["model"] == m].sort_values("layer")
+        if not g.empty:
+            ax.plot(g["layer"], g["top1_accuracy"], color="#9a9a9a", lw=1.0,
+                    marker="o", markersize=1.8, zorder=1)
+        # nulls as flat bands (both are flat within 0.06-0.08 at every layer)
+        if not null.empty:
+            ax.axhspan(float(null["top1"].min()), float(null["ci_hi"].max()),
+                       color=s["color"], alpha=0.10, lw=0, zorder=0)
+        sh = shuffle[shuffle["model"] == m]
+        if not sh.empty:
+            ax.axhline(float(sh["top1_p97_5"].max()), color="#444444", lw=0.6,
+                       ls=":", zorder=1)
+        for lens, ls in _LENS_LS.items():
+            c = curves[(curves["model"] == m) & (curves["lens"] == lens)].sort_values("layer")
+            if c.empty:
+                continue
+            x = c["layer"].to_numpy(); y = c["top1"].to_numpy()
+            ax.fill_between(x, c["ci_lo"], c["ci_hi"], color=s["color"], alpha=0.18, lw=0)
+            ax.plot(x, y, color=s["color"], ls=ls, lw=1.1, marker=s["marker"],
+                    markersize=2.2, markevery=1, zorder=3,
+                    markerfacecolor=s["color"] if lens == "raw" else "white")
+            if lens == "raw":
+                d = emergence_depth(y)
+                ax.axvline(x[d], color=s["color"], lw=0.6, ls="-.", zorder=1)
+                ax.annotate(f"emergence L{int(x[d])}", (x[d], 0.02), xytext=(3, 0),
+                            textcoords="offset points", fontsize=5.5, color=s["color"],
+                            ha="left", va="bottom")
+        if not g.empty:
+            h = find_humps(g["top1_accuracy"].to_numpy())
+            for key in ("hump1", "hump2"):
+                i = h[key]
+                if i is not None:
+                    xl = int(g["layer"].iloc[i]); yl = float(g["top1_accuracy"].iloc[i])
+                    ax.plot([xl], [yl], marker="v", markersize=4, color="#9a9a9a", zorder=4,
+                            markeredgecolor="white", markeredgewidth=0.4)
+        ax.set_title(s["label"], fontsize=7, pad=2)
+        ax.set_xlabel("Layer")
+        ax.set_xlim(0, int(curves[curves["model"] == m]["layer"].max()))
+        ax.set_ylim(0, 0.8)
+        _letter(ax, letter)
+    axes[0].set_ylabel("P(top-1 candidate is a target)")
+
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [
+        Line2D([0], [0], color="#333333", ls="-", lw=1.1, label="raw lens at $p_{read}$"),
+        Line2D([0], [0], color="#333333", ls="--", lw=1.1, label="tuned lens at $p_{read}$"),
+        Line2D([0], [0], color="#9a9a9a", lw=1.0, marker="o", markersize=2, label="cosine $g(\\ell)$ (humps $\\blacktriangledown$)"),
+        Patch(facecolor="#888888", alpha=0.25, label="random-init decoder"),
+        Line2D([0], [0], color="#444444", ls=":", lw=0.6, label="shuffled labels, 97.5th pct"),
+    ]
+    _top_legend(fig, handles, ncol=5)
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -159,9 +252,10 @@ def _read(path: str) -> Optional[pd.DataFrame]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--fig", required=True, choices=("geometry",))
+    ap.add_argument("--fig", required=True, choices=("geometry", "lens"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--analysis-dir", default="output/analysis")
+    ap.add_argument("--lens-dir", default="output/lens_analysis")
     ap.add_argument("--pooling", default="mean")
     ap.add_argument("--condition", default="no_social")
     a = ap.parse_args(argv)
@@ -171,6 +265,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _read(os.path.join(a.analysis_dir, "analysis_layer_margins.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_position_confound.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_concordance.csv")),
+            out_path=a.out, pooling=a.pooling, condition=a.condition)
+        print(f"wrote {out}")
+    elif a.fig == "lens":
+        out = fig_lens(
+            _read(os.path.join(a.lens_dir, f"lens_curves_answer_{a.condition}.csv")),
+            _read(os.path.join(a.lens_dir, f"lens_shuffle_control_answer_{a.condition}.csv")),
+            _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
             out_path=a.out, pooling=a.pooling, condition=a.condition)
         print(f"wrote {out}")
     return 0
