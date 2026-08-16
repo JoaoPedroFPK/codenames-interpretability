@@ -434,8 +434,7 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         title = ("real patches, every role at every layer" if m in grids
                  else "real patches at the top-scan site per layer")
         ax_c.set_title(f"{s['label']}: {title}", fontsize=6, pad=2, loc="right")
-        ax_c.legend(fontsize=5, frameon=False, loc="center right",
-                    ncol=2 if m in grids else 1)
+        ax_c.legend(fontsize=5, frameon=False, loc="best", ncol=2 if m in grids else 1)
         _letter(ax_c, next(letters))
     fig.tight_layout()
     out = Path(out_path)
@@ -508,7 +507,9 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
         eff = effects_by_model.get(m)
         if eff is not None:
             cur = confirmatory_curve(eff, width=1)
-            for role in ("hint", "cand_donor", "generation"):
+            # `final` is the generating position, which for a word-first
+            # decoder (Qwen, 91.5%) IS the answer position p_read.
+            for role in ("hint", "cand_donor", "generation", "final"):
                 c = cur[cur["role"] == role]
                 if c.empty:
                     continue
@@ -525,7 +526,13 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
         ax.set_xlim(-0.5, (int(g["layer"].max()) if not g.empty else 32) + 0.5)
         _letter(ax, letter)
     axes[0].set_ylabel("top-1 fraction / patch effect $e$")
-    handles, labels = axes[0].get_legend_handles_labels()
+    # Legend over ALL panels: a role tested in one decoder only (Qwen's
+    # generating position) must still be named.
+    seen, handles = set(), []
+    for ax in axes:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            if lab not in seen:
+                seen.add(lab); handles.append(h)
     _top_legend(fig, handles, ncol=4)
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     out = Path(out_path)
