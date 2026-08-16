@@ -98,7 +98,9 @@ def _mark_hump(ax, x: float, y: float, label: str, color: str, *, dy: float = 0.
 def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
                  confound: pd.DataFrame, conc_summary: pd.DataFrame, *,
                  out_path: os.PathLike, pooling: str = "mean",
-                 condition: str = "no_social", panels: str = "abcd") -> Path:
+                 condition: str = "no_social", panels: str = "abcd",
+                 human_accuracy: Optional[float] = None,
+                 panel_b_models: Optional[Sequence[str]] = None) -> Path:
     """(a) decoder g(l) with humps, generation reference lines and the
     random-init null; (b) anisotropy-adjusted margin, all models; (c) mean
     pairwise-cosine anisotropy, all models; (d) positional confound rho.
@@ -136,8 +138,12 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
         if not ref.empty:
             ax_a.axhline(float(ref["generation_accuracy"].iloc[0]),
                          color=s["color"], ls=":", lw=0.7, alpha=0.7, zorder=0)
+    if human_accuracy is not None:
+        ax_a.axhline(human_accuracy, color="#333333", ls="-", lw=0.6, alpha=0.6, zorder=0)
+        ax_a.annotate("human guessers", (0.01, human_accuracy), xytext=(2, 2),
+                      textcoords="offset points", fontsize=5.5, color="#333333", va="bottom")
     ax_a.set_ylabel("P(cosine top-1 is a target)")
-    ax_a.set_ylim(0, 0.72)
+    ax_a.set_ylim(0, 0.76)
     ax_a.text(0.99, 0.97, "dotted: generation accuracy", transform=ax_a.transAxes,
               ha="right", va="top", fontsize=5.5, color="#555555")
 
@@ -145,11 +151,13 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
     mg = margins[(margins["pooling_method"] == pooling)
                  & (margins["condition"] == condition)]
     models = _ordered_models(pd.concat([mg[["model"]], confound[["model"]]]))
+    b_models = list(panel_b_models) if panel_b_models else models
     for m in models:
         sub = mg[mg["model"] == m].sort_values("layer_frac")
         if sub.empty:
             continue
-        _line(ax_b, sub["layer_frac"].to_numpy(), sub["adjusted_margin"].to_numpy(), m)
+        if m in b_models:
+            _line(ax_b, sub["layer_frac"].to_numpy(), sub["adjusted_margin"].to_numpy(), m)
         if ax_c is not None:
             _line(ax_c, sub["layer_frac"].to_numpy(), sub["mean_anisotropy"].to_numpy(), m)
     ax_b.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
@@ -173,7 +181,7 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
         ax.set_xlabel(DEPTH_LABEL)
         ax.set_xlim(0, 1)
         _letter(ax, letter)
-    _top_legend(fig, _model_handles(models), ncol=4 if two_rows else 7)
+    _top_legend(fig, _model_handles(models if two_rows else b_models), ncol=4 if two_rows else 7)
     fig.tight_layout(rect=(0, 0, 1, 0.91 if two_rows else 0.86))
 
     out = Path(out_path)
@@ -558,6 +566,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--lens-dir", default="output/lens_analysis")
     ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
     ap.add_argument("--panels", default="abcd", help="geometry panels: abcd or ab")
+    ap.add_argument("--human-accuracy", type=float, default=None)
+    ap.add_argument("--panel-b-models", default=None, help="comma-separated subset for panel (b)")
     ap.add_argument("--emergence", default="mistral=20,qwen=25",
                     help="model=layer pairs for the lens emergence marker")
     ap.add_argument("--pooling", default="mean")
@@ -571,7 +581,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _read(os.path.join(a.analysis_dir, "analysis_layer_margins.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_position_confound.csv")),
             _read(os.path.join(a.analysis_dir, "analysis_concordance.csv")),
-            out_path=a.out, pooling=a.pooling, condition=a.condition, panels=a.panels)
+            out_path=a.out, pooling=a.pooling, condition=a.condition, panels=a.panels,
+            human_accuracy=a.human_accuracy,
+            panel_b_models=a.panel_b_models.split(",") if a.panel_b_models else None)
         print(f"wrote {out}")
     elif a.fig == "lens":
         out = fig_lens(
