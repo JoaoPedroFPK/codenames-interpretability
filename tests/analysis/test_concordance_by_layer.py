@@ -33,3 +33,21 @@ def test_base_decoder_gets_top1_without_generations(tmp_path):
     inst = out[(out.model == "mistral") & (out.pooling == "mean")].sort_values("layer")
     assert list(inst.concordance) == [1.0, 0.0]
     assert not any("mistral_base" in m and "generation" in m for m in missing)
+
+
+def test_random_init_decoder_gets_top1_by_layer(tmp_path):
+    """The random-init decoder is the null for the geometric readout; its
+    top-1-by-layer must be in the table (concordance undefined)."""
+    for prefix in ("mistral", "random_qwen"):
+        d = tmp_path / f"{prefix}_outputs"
+        d.mkdir()
+        _metrics([(0, 0, [("SEA", "target", 1), ("MOON", "tan", 2)]),
+                  (0, 1, [("SEA", "target", 2), ("MOON", "tan", 1)])]).to_parquet(
+            d / f"{prefix}_metrics_no_social.parquet", index=False)
+    pd.DataFrame({"row_id": [0], "generated_word": ["SEA"]}).to_csv(
+        tmp_path / "mistral_outputs" / "mistral_generation_no_social.csv", index=False)
+    out = build_concordance_by_layer(str(tmp_path))
+    rnd = out[(out.model == "random_qwen") & (out.pooling == "mean")].sort_values("layer")
+    assert list(rnd.top1_accuracy) == [1.0, 0.0]
+    assert rnd.concordance.isna().all()
+    assert bool(rnd.is_random.iloc[0]) is True

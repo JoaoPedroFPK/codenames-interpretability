@@ -100,25 +100,35 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
                  out_path: os.PathLike, pooling: str = "mean",
                  condition: str = "no_social", panels: str = "abcd",
                  human_accuracy: Optional[float] = None,
-                 panel_b_models: Optional[Sequence[str]] = None) -> Path:
+                 panel_b_models: Optional[Sequence[str]] = None,
+                 panel_a_models: Optional[Sequence[str]] = None) -> Path:
     """(a) decoder g(l) with humps, generation reference lines and the
     random-init null; (b) anisotropy-adjusted margin, all models; (c) mean
     pairwise-cosine anisotropy, all models; (d) positional confound rho.
-    ``panels="ab"`` renders the one-row main-text version.
+    ``panels="ab"`` renders the one-row version, ``panels="a"`` the single
+    main-text panel. ``panel_a_models`` overrides the decoders drawn in (a)
+    (e.g. to add a base variant in the appendix); the null is always drawn.
     """
     two_rows = panels == "abcd"
-    plt = _paper_fig((PAPER_W, 4.6 if two_rows else 2.15))
+    single = panels == "a"
+    a_models = tuple(panel_a_models) if panel_a_models else DECODERS
     if two_rows:
+        plt = _paper_fig((PAPER_W, 4.6))
         fig, axes = plt.subplots(2, 2, figsize=(PAPER_W, 4.6))
         ax_a, ax_b, ax_c, ax_d = axes.ravel()
+    elif single:
+        plt = _paper_fig((PAPER_W * 0.62, 2.05))
+        fig, ax_a = plt.subplots(1, 1, figsize=(PAPER_W * 0.62, 2.05))
+        ax_b = ax_c = ax_d = None
     else:
+        plt = _paper_fig((PAPER_W, 2.15))
         fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(PAPER_W, 2.15))
         ax_c = ax_d = None
 
     # (a) geometric top-1 for the decoders + null --------------------------
     conc = conc_by_layer[(conc_by_layer["pooling"] == pooling)
                          & (conc_by_layer["condition"] == condition)]
-    for m in (*DECODERS, DECODER_NULL):
+    for m in (*a_models, DECODER_NULL):
         sub = conc[conc["model"] == m].sort_values("layer")
         if sub.empty:
             continue
@@ -156,12 +166,13 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
         sub = mg[mg["model"] == m].sort_values("layer_frac")
         if sub.empty:
             continue
-        if m in b_models:
+        if ax_b is not None and m in b_models:
             _line(ax_b, sub["layer_frac"].to_numpy(), sub["adjusted_margin"].to_numpy(), m)
         if ax_c is not None:
             _line(ax_c, sub["layer_frac"].to_numpy(), sub["mean_anisotropy"].to_numpy(), m)
-    ax_b.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
-    ax_b.set_ylabel("Anisotropy-adjusted margin")
+    if ax_b is not None:
+        ax_b.axhline(0, lw=0.5, color="#bbbbbb", zorder=0)
+        ax_b.set_ylabel("Anisotropy-adjusted margin")
     if ax_c is not None:
         ax_c.set_ylabel("Mean pairwise cosine (anisotropy)")
         ax_c.set_ylim(0, 1)
@@ -181,8 +192,18 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
         ax.set_xlabel(DEPTH_LABEL)
         ax.set_xlim(0, 1)
         _letter(ax, letter)
-    _top_legend(fig, _model_handles(models if two_rows else b_models), ncol=4 if two_rows else 7)
-    fig.tight_layout(rect=(0, 0, 1, 0.91 if two_rows else 0.86))
+    if single:
+        legend_models = [m for m in (*a_models, DECODER_NULL)
+                         if not conc[conc["model"] == m].empty]
+        _top_legend(fig, _model_handles(legend_models), ncol=3)
+        fig.tight_layout(rect=(0, 0, 1, 0.84))
+    else:
+        legend_models = list(models if two_rows else b_models)
+        if two_rows:
+            legend_models += [m for m in a_models if m not in legend_models
+                              and not conc[conc["model"] == m].empty]
+        _top_legend(fig, _model_handles(legend_models), ncol=4 if two_rows else 7)
+        fig.tight_layout(rect=(0, 0, 1, 0.91 if two_rows else 0.86))
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +344,22 @@ def confirmatory_curve(effects: pd.DataFrame, *, width: int = 1, n_boot: int = 2
     return pd.DataFrame(rows).sort_values(["layer", "role"]).reset_index(drop=True)
 
 
+def redundant_roles(cur: pd.DataFrame, tol: float = 1e-9) -> set:
+    """Roles not worth drawing for a word-first model: when the ``final``
+    (generating-position) curve coincides with ``p_read`` at every layer the
+    readout *is* the generating position, so ``final`` duplicates ``p_read`` and
+    the ``generation`` role (answer tokens) lies after the readout and is zero
+    by construction. Returns the set to drop (empty otherwise)."""
+    f = cur[cur["role"] == "final"].set_index("layer")["e"]
+    p = cur[cur["role"] == "p_read"].set_index("layer")["e"]
+    if f.empty or p.empty:
+        return set()
+    common = f.index.intersection(p.index)
+    if len(common) and float((f.loc[common] - p.loc[common]).abs().max()) < tol:
+        return {"final", "generation"}
+    return set()
+
+
 def grid_curve(grid: pd.DataFrame, nulls: pd.DataFrame, *, width: int = 1,
                n_boot: int = 2000, seed: int = 2026) -> tuple:
     """``(curve, null_band)`` for the role x layer grid (``causal-patch --grid``).
@@ -428,9 +465,10 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
             ax_c.annotate(f"lens emergence L{emergence[m]}", (emergence[m], -0.02),
                           xytext=(3, 0), textcoords="offset points", fontsize=5,
                           color=s["color"], ha="left", va="bottom")
+        skip = redundant_roles(cur) if m in grids else set()
         for role, st in ROLE_STYLE.items():
             c = cur[cur["role"] == role]
-            if c.empty:
+            if c.empty or role in skip:
                 continue
             ax_c.errorbar(c["layer"], c["e"], yerr=[c["e"] - c["lo"], c["hi"] - c["e"]],
                           fmt=st["marker"], color=st["color"], markersize=3, lw=0.9,
@@ -605,11 +643,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--analysis-dir", default="output/analysis")
     ap.add_argument("--lens-dir", default="output/lens_analysis")
     ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
-    ap.add_argument("--panels", default="abcd", help="geometry panels: abcd or ab")
+    ap.add_argument("--panels", default="abcd", help="geometry panels: abcd, ab or a")
     ap.add_argument("--layout", default="both", choices=("both", "curves", "scan"),
                     help="causal figure layout: both (scan+curve per model), curves only, or scan only")
     ap.add_argument("--human-accuracy", type=float, default=None)
     ap.add_argument("--panel-b-models", default=None, help="comma-separated subset for panel (b)")
+    ap.add_argument("--panel-a-models", default=None,
+                    help="comma-separated decoders drawn in panel (a) (default: mistral,qwen)")
     ap.add_argument("--emergence", default="mistral=20,qwen=25",
                     help="model=layer pairs for the lens emergence marker")
     ap.add_argument("--pooling", default="mean")
@@ -627,7 +667,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _read(os.path.join(a.analysis_dir, "analysis_concordance.csv")),
             out_path=a.out, pooling=a.pooling, condition=a.condition, panels=a.panels,
             human_accuracy=a.human_accuracy,
-            panel_b_models=a.panel_b_models.split(",") if a.panel_b_models else None)
+            panel_b_models=a.panel_b_models.split(",") if a.panel_b_models else None,
+            panel_a_models=a.panel_a_models.split(",") if a.panel_a_models else None)
         print(f"wrote {out}")
     elif a.fig == "lens":
         out = fig_lens(

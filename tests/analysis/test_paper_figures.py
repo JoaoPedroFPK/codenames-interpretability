@@ -53,6 +53,20 @@ def test_fig_geometry_runs(tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def test_fig_geometry_single_panel_and_extra_panel_a_models(tmp_path):
+    """``panels="a"`` renders one axis; ``panel_a_models`` adds a base decoder
+    to panel (a) when its curve is present (appendix version)."""
+    from codenames.analysis.paper_figures import fig_geometry
+    conc = _conc(models=("mistral", "qwen", "random_qwen", "mistral_base"))
+    out = fig_geometry(conc, _margins(), _confound(), _summary(),
+                       out_path=tmp_path / "F2a.pdf", panels="a")
+    assert out.exists() and out.stat().st_size > 0
+    out2 = fig_geometry(conc, _margins(), _confound(), _summary(),
+                        out_path=tmp_path / "A_geo.pdf", panels="abcd",
+                        panel_a_models=("mistral", "qwen", "mistral_base"))
+    assert out2.exists() and out2.stat().st_size > 0
+
+
 def _lens_curves(models=("mistral", "qwen", "random_qwen"), n_layers=9):
     rows = []
     for m in models:
@@ -164,3 +178,22 @@ def test_fig_causal_with_grid_runs(tmp_path):
     out = fig_causal({"mistral": (scan, _effects())}, _conc(), {"mistral": 6},
                      out_path=tmp_path / "F4g.pdf", grids={"mistral": (grid, nulls)})
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_redundant_roles_for_word_first_models():
+    """When the generating position is p_read (word-first answers), the
+    'final' curve duplicates 'p_read' and 'generation' lies after the readout;
+    both are dropped from the plotted curve."""
+    from codenames.analysis.paper_figures import redundant_roles
+    import pandas as pd
+    rows = []
+    for layer in range(5):
+        e = layer / 4
+        rows += [{"layer": layer, "role": "p_read", "e": e},
+                 {"layer": layer, "role": "final", "e": e},
+                 {"layer": layer, "role": "generation", "e": 0.0},
+                 {"layer": layer, "role": "hint", "e": 1 - e}]
+    cur = pd.DataFrame(rows)
+    assert redundant_roles(cur) == {"final", "generation"}
+    cur.loc[cur.role == "final", "e"] += 0.1
+    assert redundant_roles(cur) == set()

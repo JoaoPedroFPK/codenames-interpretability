@@ -44,8 +44,9 @@ MODEL_FAMILY: Dict[str, str] = {
 MODEL_PREFIXES = list(MODEL_FAMILY)
 GENERATION_PREFIXES = ["mistral", "qwen", "llama"]  # trained instruct decoders only
 # Decoders read through the geometry only (no chat template, no generation):
-# they enter the layer-wise top-1 table with concordance left undefined.
-GEOMETRY_ONLY_PREFIXES = ["mistral_base", "qwen_base"]
+# they enter the layer-wise top-1 table with concordance left undefined. The
+# random-init decoder is listed here too, as the null curve for that table.
+GEOMETRY_ONLY_PREFIXES = ["mistral_base", "qwen_base", "random_qwen"]
 CONDITIONS = ["no_social", "with_social"]
 POOLINGS = ["mean", "max_norm"]
 
