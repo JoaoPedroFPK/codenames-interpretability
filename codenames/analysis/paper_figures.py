@@ -296,11 +296,11 @@ ROLE_STYLE = {
     "cand_target": {"label": "candidate (target)",  "color": OKABE_ITO["sky_blue"],       "marker": "v"},
     "cand_donor":  {"label": "candidate (donor)",   "color": OKABE_ITO["orange"],         "marker": "s"},
     "generation":  {"label": "answer positions",    "color": OKABE_ITO["reddish_purple"], "marker": "D"},
-    "scaffold":    {"label": "answer scaffold (before $p_{read}$)", "color": OKABE_ITO["vermillion"], "marker": "P"},
-    "p_read":      {"label": "$p_{read}$ alone",    "color": OKABE_ITO["yellow"],         "marker": "X"},
+    "scaffold":    {"label": "scaffold (before $p_{read}$)", "color": OKABE_ITO["vermillion"], "marker": "P"},
+    "p_read":      {"label": "$p_{read}$ alone",    "color": "#000000",                   "marker": "X"},
     "final":       {"label": "generating position", "color": OKABE_ITO["blue"],           "marker": "^"},
 }
-NULL_STYLE = {"label": "random site (matched count)", "color": "#888888"}
+NULL_STYLE = {"label": "random site (count-matched)", "color": "#888888"}
 
 
 def confirmatory_curve(effects: pd.DataFrame, *, width: int = 1, n_boot: int = 2000,
@@ -457,8 +457,18 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         title = (f"{what}, every role at every layer" if m in grids
                  else "real patches at the top-scan site per layer")
         ax_c.set_title(f"{s['label']}: {title}", fontsize=6, pad=2, loc="right")
-        ax_c.legend(fontsize=5, frameon=False, loc="best", ncol=2 if m in grids else 1)
+        # The grid legend has 8 entries; the only empty region of a grid
+        # panel is the right-centre band (between the saturated answer
+        # curves above and the inert candidate curves below).
         _letter(ax_c, next(letters))
+    # One legend row for the whole figure: the grid panels carry eight
+    # series and no in-panel placement stays clear of the curves.
+    seen, handles = set(), []
+    for row in axes:
+        for h, lab in zip(*row[1].get_legend_handles_labels()):
+            if lab not in seen:
+                seen.add(lab); handles.append(h)
+    _top_legend(fig, handles, ncol=4)
     if layout != "both":
         for d in dummy:
             plt.close(d.figure)
@@ -468,7 +478,7 @@ def fig_causal(per_model: Dict[str, tuple], conc_by_layer: pd.DataFrame,
         if layout == "curves":
             for ax in axes[1:, 1]:
                 ax.set_ylabel("")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.93 if layout == "both" and n > 1 else 0.86))
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches="tight")
