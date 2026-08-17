@@ -89,3 +89,40 @@ def test_compute_scores_accepts_an_index_frame_and_skips_not_ok(tmp_path):
                           "ok": [True, False]})
     out = compute_scores(hidden_path, index, df, FakeTokenizer(), readout, "raw")
     assert set(out["row_id"]) == {10}
+
+
+def test_final_layer_is_not_normalised_twice(tmp_path):
+    """``output_hidden_states`` returns the POST-final-norm state as its last
+    entry, so the raw lens at that index is Unembed(h), not
+    Unembed(RMSNorm(h)). Norming twice is not idempotent when the norm weight
+    is far from 1 (Qwen: mean 3.8, max 10.8) and cost Qwen 4 points of
+    final-layer agreement with its own generation."""
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from codenames.lens.apply import Readout, compute_scores, rmsnorm_np
+
+    class Tok:
+        def encode(self, w, add_special_tokens=False):
+            return [{"sea": 1, "ship": 2, "moon": 3}[w.strip().lower()]]
+
+    rng = np.random.default_rng(0)
+    d, V, L = 8, 4, 2
+    H = rng.normal(size=(1, L + 1, d)).astype(np.float16)
+    path = tmp_path / "h.npy"
+    np.save(path, H)
+    index = pd.DataFrame([{"board_idx": 0, "row_id": 0, "ok": True}])
+    df = pd.DataFrame([{"row_id": 0, "candidates": ["sea", "ship", "moon"],
+                        "targets": ["sea"], "black": ["ship"]}])
+    W = rng.normal(size=(V, d)).astype(np.float32)
+    w = np.full(d, 5.0, dtype=np.float32) * rng.uniform(0.2, 2.0, size=d).astype(np.float32)
+    ro = Readout(norm_weight=w, lm_head=W, eps=1e-6)
+    scores = compute_scores(str(path), index, df, Tok(), ro, "raw")
+    final = scores[scores.layer == L].set_index("word")["score"]
+    raw_logits = H[0, L].astype(np.float32) @ W.T
+    for word, tid in {"sea": 1, "ship": 2, "moon": 3}.items():
+        assert final[word] == pytest.approx(float(raw_logits[tid]), rel=1e-4)
+    # interior layers still go through the norm
+    inner = scores[scores.layer == 0].set_index("word")["score"]
+    normed = rmsnorm_np(H[0, 0][None].astype(np.float32), w, 1e-6)[0] @ W.T
+    assert inner["sea"] == pytest.approx(float(normed[1]), rel=1e-4)

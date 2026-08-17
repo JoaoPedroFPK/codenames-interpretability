@@ -89,7 +89,15 @@ def compute_scores(
         H = np.asarray(mm[:len(boards), layer, :], dtype=np.float32)
         if translators is not None:
             H = translators.translate(H, layer)
-        logits = rmsnorm_np(H, readout.norm_weight, readout.eps) @ W.T
+        if layer == n_states - 1:
+            # The last cached state is already the POST-final-norm residual
+            # (``output_hidden_states`` convention), so the lens here is the
+            # unembedding alone: exactly the model's own logits. Norming it
+            # again is not idempotent when the norm weight is far from 1 and
+            # cost Qwen ~4 points of final-layer agreement (0.956 -> 0.995).
+            logits = H @ W.T
+        else:
+            logits = rmsnorm_np(H, readout.norm_weight, readout.eps) @ W.T
         recs = []
         for i, board in enumerate(boards):
             if board is None:
