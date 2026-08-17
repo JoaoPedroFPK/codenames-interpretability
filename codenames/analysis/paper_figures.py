@@ -549,16 +549,22 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
         eff = effects_by_model.get(m)
         if eff is not None:
             cur = confirmatory_curve(eff, width=1)
-            # `final` is the generating position, which for a word-first
-            # decoder (Qwen, 91.5%) IS the answer position p_read.
-            for role in ("hint", "cand_donor", "generation", "final"):
+            if "p_read" in set(cur["role"]):
+                # Full grid available: the hint span, a single candidate span
+                # and p_read alone, at every layer.
+                roles = ("hint", "cand_target", "p_read")
+            else:
+                # Per-layer-locus run: `final` is the generating position,
+                # which for a word-first decoder (Qwen) IS p_read.
+                roles = ("hint", "cand_donor", "generation", "final")
+            for role in roles:
                 c = cur[cur["role"] == role]
                 if c.empty:
                     continue
                 st = ROLE_STYLE[role]
                 ax.errorbar(c["layer"], c["e"], yerr=[c["e"] - c["lo"], c["hi"] - c["e"]],
-                            fmt=st["marker"], color=st["color"], markersize=2.8, lw=0.8,
-                            capsize=1.2, label=f"patch $e$: {st['label']}", zorder=3)
+                            fmt=st["marker"], color=st["color"], markersize=2.4, lw=0.7,
+                            capsize=1.0, label=f"patch $e$: {st['label']}", zorder=3)
         else:
             ax.text(0.5, 0.92, "patching: pending", transform=ax.transAxes, ha="center",
                     fontsize=6, color="#888888")
@@ -652,9 +658,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif a.fig == "triangulation":
         effects = {}
         for m in a.models.split(","):
-            pq = os.path.join("output", f"{m}_outputs",
-                              f"{m}_causal_effects_counterfactual_{a.condition}.parquet")
-            if os.path.exists(pq):
+            base = os.path.join("output", f"{m}_outputs")
+            grid_pq = os.path.join(base, f"{m}_causal_effects_grid_counterfactual_{a.condition}.parquet")
+            pq = os.path.join(base, f"{m}_causal_effects_counterfactual_{a.condition}.parquet")
+            if os.path.exists(grid_pq) and not a.no_grid:
+                effects[m] = pd.read_parquet(grid_pq)
+            elif os.path.exists(pq):
                 effects[m] = pd.read_parquet(pq)
         out = fig_triangulation(
             _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
