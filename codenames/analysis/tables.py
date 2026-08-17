@@ -43,6 +43,9 @@ MODEL_FAMILY: Dict[str, str] = {
 }
 MODEL_PREFIXES = list(MODEL_FAMILY)
 GENERATION_PREFIXES = ["mistral", "qwen", "llama"]  # trained instruct decoders only
+# Decoders read through the geometry only (no chat template, no generation):
+# they enter the layer-wise top-1 table with concordance left undefined.
+GEOMETRY_ONLY_PREFIXES = ["mistral_base", "qwen_base"]
 CONDITIONS = ["no_social", "with_social"]
 POOLINGS = ["mean", "max_norm"]
 
@@ -323,18 +326,25 @@ def build_concordance_by_layer(
     pruning and a canonical-permutation filter, so memory stays modest.
     """
     frames: List[pd.DataFrame] = []
-    for prefix in GENERATION_PREFIXES:
+    for prefix in GENERATION_PREFIXES + GEOMETRY_ONLY_PREFIXES:
+        geometry_only = prefix in GEOMETRY_ONLY_PREFIXES
         for cond in CONDITIONS:
             mdir = _model_dir(output_dir, prefix)
             pq_path = os.path.join(mdir, f"{prefix}_metrics_{cond}.parquet")
             gen_path = os.path.join(mdir, f"{prefix}_generation_{cond}.csv")
-            if not (os.path.exists(pq_path) and os.path.exists(gen_path)):
-                if missing is not None:
-                    missing.append(f"{prefix} {cond}: metrics parquet + generation CSV")
+            if not os.path.exists(pq_path) or (
+                    not geometry_only and not os.path.exists(gen_path)):
+                if missing is not None and not (geometry_only and cond != "no_social"):
+                    missing.append(f"{prefix} {cond}: metrics parquet"
+                                   + ("" if geometry_only else " + generation CSV"))
                 continue
 
-            gen = pd.read_csv(gen_path, usecols=["row_id", "generated_word"])
-            gen = gen.drop_duplicates("row_id")
+            if geometry_only:
+                gen = pd.DataFrame({"row_id": pd.Series(dtype=int),
+                                    "generated_word": pd.Series(dtype=object)})
+            else:
+                gen = pd.read_csv(gen_path, usecols=["row_id", "generated_word"])
+                gen = gen.drop_duplicates("row_id")
 
             cols = ["row_id", "layer", "word", "word_type"] + \
                    [f"rank_{pm}" for pm in POOLINGS]
@@ -353,7 +363,9 @@ def build_concordance_by_layer(
                 top = top.merge(gen, on="row_id", how="left")
                 top["concordant"] = (
                     top["generated_word"].notna() & (top["word"] == top["generated_word"])
-                )
+                ).astype(float)
+                if geometry_only:
+                    top["concordant"] = np.nan   # undefined without generations
                 top["top1_is_target"] = top["word_type"] == "target"
                 agg = top.groupby("layer").agg(
                     concordance=("concordant", "mean"),
