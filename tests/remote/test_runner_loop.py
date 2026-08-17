@@ -139,3 +139,23 @@ def test_loop_refuses_to_start_beside_a_live_runner(store, cfg):
     )
     assert rc == 2
     assert store.read_status("j1") is None
+
+
+def test_loop_exports_hf_token_from_the_drive_secrets_file(store, cfg, tmp_path, monkeypatch):
+    """Gated Hub models (Llama) need HF_TOKEN in the job's environment. The
+    runner reads it from <jobs_root>/../_secrets/hf_token when the env has
+    none, so a token uploaded once to Drive serves every session without
+    touching Colab Secrets. Env wins over the file; a missing file is fine."""
+    import os
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    secrets = tmp_path / "_secrets"
+    secrets.mkdir()
+    (secrets / "hf_token").write_text("hf_testtoken\n")
+    run_agent_loop(cfg, store=store, now_fn=Clock(), max_iterations=1)
+    assert os.environ.get("HF_TOKEN") == "hf_testtoken"
+    assert os.environ.get("HUGGING_FACE_HUB_TOKEN") == "hf_testtoken"
+    # an explicit environment token is never overwritten
+    os.environ["HF_TOKEN"] = "hf_fromenv"
+    run_agent_loop(cfg, store=store, now_fn=Clock(), max_iterations=1)
+    assert os.environ["HF_TOKEN"] == "hf_fromenv"

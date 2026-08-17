@@ -13,6 +13,7 @@ Two rules shape the implementation:
    practice.
 """
 
+import os
 import shlex
 import signal
 import subprocess
@@ -246,6 +247,31 @@ def execute_job(
     return status
 
 
+def export_hf_token(jobs_root: Path) -> bool:
+    """Put a Hugging Face token into the environment jobs inherit.
+
+    Gated Hub repos (meta-llama/Llama-3.1-8B-Instruct) need a token. An
+    explicit ``HF_TOKEN`` in the environment (Colab Secret via the notebook's
+    Cell 3c) wins; otherwise ``<jobs_root>/../_secrets/hf_token`` -- a file
+    uploaded once to the same private Drive folder as the job queue -- is
+    used. Returns True if a token is set afterwards.
+    """
+    if os.environ.get("HF_TOKEN"):
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", os.environ["HF_TOKEN"])
+        return True
+    path = Path(jobs_root).parent / "_secrets" / "hf_token"
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not token:
+        return False
+    os.environ["HF_TOKEN"] = token
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+    print("[runner] HF token loaded from Drive secrets file (gated repos reachable).")
+    return True
+
+
 def write_heartbeat(
     cfg: RunnerConfig,
     store: JobStore,
@@ -308,6 +334,8 @@ def run_agent_loop(
         hb = store.read_heartbeat()
         print(f"[runner] another runner is live ({hb.runner_id}); refusing to start.")
         return 2
+
+    export_hf_token(cfg.jobs_root)
 
     started_mono = time.monotonic()
     idle_since = started_mono
