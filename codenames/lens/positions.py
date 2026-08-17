@@ -48,9 +48,11 @@ from ..data import GIVER_COLS, extract_giver_features
 from ..prompts import build_prompt
 
 POSITION_CHANNELS = ("hint", "cand_target")
-ATTENTION_COLS = ("to_hint", "to_cand_target", "to_cand_other",
+ATTENTION_COLS = ("to_prefix", "to_hint", "to_cand_target", "to_cand_other",
                   "to_scaffold", "to_generation")
-_SCAFFOLD_ROLES = ("prefix", "post_hint", "list_scaffold", "question", "final")
+# `prefix` (BOS + template head, where the attention sink lives) is reported
+# on its own so the sink does not swamp the scaffold column.
+_SCAFFOLD_ROLES = ("post_hint", "list_scaffold", "question", "final")
 _FLUSH_EVERY = 200
 
 _INDEX_COLS = ["board_idx", "row_id", "hint_ok", "hint_n_tokens",
@@ -83,6 +85,7 @@ def _attention_row(attn: torch.Tensor, roles: np.ndarray, p_read: int) -> Dict[s
         return float(mass[np.isin(r, idx)].sum())
 
     return {
+        "to_prefix": total(["prefix"]),
         "to_hint": total(["hint"]),
         "to_cand_target": total(["cand_target"]),
         "to_cand_other": total(["cand_other", "cand_donor"]),
