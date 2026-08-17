@@ -30,6 +30,12 @@ def _wilson_confidence_interval(successes: int, n: int, z: float = 1.96) -> Tupl
     return (max(0.0, center - margin), min(1.0, center + margin))
 
 
+def _present(results: Dict):
+    """The conditions this run actually produced, in canonical order (a run
+    may be restricted with ``--conditions``)."""
+    return [m for m in ("no_social", "with_social") if m in results]
+
+
 def sc1_prompt_structure(
     df_sample: pd.DataFrame,
     tokenizer,
@@ -93,7 +99,7 @@ def sc2_span_coverage(results: Dict) -> None:
     print("SC2: Span Coverage and Token Count Statistics")
     print("=" * 60)
 
-    for mode_name in ["no_social", "with_social"]:
+    for mode_name in _present(results):
         mdf = results[mode_name]["metrics_df"]
         if len(mdf) == 0:
             print(f"\n{mode_name}: no metrics rows; skipping.")
@@ -126,7 +132,7 @@ def sc3_anisotropy(results: Dict, num_layers: int) -> None:
     print("SC3: Anisotropy Characterization (mean pooling, no_social)")
     print("=" * 60)
 
-    mdf = results["no_social"]["metrics_df"]
+    mdf = results.get("no_social", {}).get("metrics_df", pd.DataFrame())
     if len(mdf) > 0:
         mdf_canon = mdf[mdf["permutation_id"] == 0]
         aniso_per_layer = (
@@ -159,7 +165,7 @@ def sc4_behavioral_accuracy(
     print("SC4: Behavioral Accuracy Summary")
     print("=" * 60)
 
-    for mode_name in ["no_social", "with_social"]:
+    for mode_name in _present(results):
         gdf = results[mode_name]["general_df"]
         gdf_canon = gdf[gdf["permutation_id"] == 0]
         gen_df = results[mode_name]["generation_df"]
@@ -228,7 +234,7 @@ def sc5_layer_margin_curve(
     for pm in pooling_methods:
         print(f"\n--- Pooling: {pm} ---")
 
-        for mode_name in ["no_social", "with_social"]:
+        for mode_name in _present(results):
             mdf = results[mode_name]["metrics_df"]
             if len(mdf) == 0:
                 continue
@@ -321,12 +327,16 @@ def sc6_positional_confound(
     print("=" * 60)
 
     # --- Order consistency check (folded from old SC4) ---
-    gdf_ns = results["no_social"]["general_df"]
-    gdf_ws = results["with_social"]["general_df"]
-    gdf_ns_canon = gdf_ns[gdf_ns["permutation_id"] == 0].set_index("row_id")
-    gdf_ws_canon = gdf_ws[gdf_ws["permutation_id"] == 0].set_index("row_id")
-    common_rows = set(gdf_ns_canon.index) & set(gdf_ws_canon.index)
-    print(f"Order consistency: {len(common_rows)} common boards (both conditions saw same alphabetical ordering)")
+    if "no_social" in results and "with_social" in results:
+        gdf_ns = results["no_social"]["general_df"]
+        gdf_ws = results["with_social"]["general_df"]
+        gdf_ns_canon = gdf_ns[gdf_ns["permutation_id"] == 0].set_index("row_id")
+        gdf_ws_canon = gdf_ws[gdf_ws["permutation_id"] == 0].set_index("row_id")
+        common_rows = set(gdf_ns_canon.index) & set(gdf_ws_canon.index)
+        print(f"Order consistency: {len(common_rows)} common boards (both conditions saw same alphabetical ordering)")
+    if "no_social" not in results:
+        print("SC6 needs the no_social condition; skipping.")
+        return
 
     # --- Per-layer Spearman ρ ---
     mdf = results["no_social"]["metrics_df"]
@@ -419,7 +429,7 @@ def sc7_shuffle_decomposition(
     print("=" * 60)
 
     mode_name = "no_social"
-    mdf = results[mode_name]["metrics_df"]
+    mdf = results.get(mode_name, {}).get("metrics_df", pd.DataFrame())
 
     if len(mdf) == 0:
         print("No metrics rows; skipping SC7.")

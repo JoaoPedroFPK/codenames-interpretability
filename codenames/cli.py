@@ -430,6 +430,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         resume=args.resume,
         reuse_canonical=args.reuse_canonical,
         checkpoint_dir=args.checkpoint_dir,
+        conditions=tuple(c.strip() for c in args.conditions.split(",") if c.strip()),
     )
 
     if not args.skip_sanity_checks:

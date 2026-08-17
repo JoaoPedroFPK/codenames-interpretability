@@ -9,7 +9,7 @@ passing a ``generation_fn``.
 
 import gc
 import os
-from typing import Callable, Dict, Optional
+from typing import Tuple, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -72,8 +72,10 @@ def run_extraction(
     resume: bool = False,
     reuse_canonical: bool = False,
     checkpoint_dir: Optional[str] = None,
+    conditions: Tuple[str, ...] = ("no_social", "with_social"),
 ) -> Dict[str, Dict]:
-    """Run the full extraction for both conditions, saving outputs to ``base_dir``.
+    """Run the full extraction for the requested conditions (default both),
+    saving outputs to ``base_dir``.
 
     When ``resume`` is True, an interrupted run in ``base_dir`` is continued:
     already-committed boards (per the per-condition manifest) are skipped and a
@@ -110,7 +112,10 @@ def run_extraction(
     random_seed           = contract.random_seed
     max_seq_len           = contract.max_seq_len
 
-    experiment_modes = [False, True]  # False = no_social, True = with_social
+    unknown = set(conditions) - {"no_social", "with_social"}
+    if unknown:
+        raise ValueError(f"unknown conditions {sorted(unknown)}")
+    experiment_modes = [m == "with_social" for m in conditions]  # False = no_social
 
     # --- Sample ---
     df_sample = df.sample(

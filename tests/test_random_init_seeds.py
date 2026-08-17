@@ -80,3 +80,43 @@ def test_seed_spread_reports_min_max_over_seeds(tmp_path):
     assert "random_bert" not in set(out["base_prefix"])   # missing runs are skipped, not zeros
     assert {"seed", "prefix", "peak_abs_rho", "peak_rho_layer", "final_rho",
             "max_margin", "final_margin", "n_layers"} <= set(out.columns)
+
+
+def test_run_conditions_flag_reaches_the_extraction_loop(tmp_path, monkeypatch):
+    """`run --conditions no_social` was parsed and silently ignored: every run
+    did both conditions (observed 2026-08-17: a seed run's log showed
+    with_social after --conditions no_social). The flag must reach
+    run_extraction and the sanity checks must tolerate one condition."""
+    import codenames.cli as cli
+    import codenames.data
+    import codenames.loop
+    import pandas as pd
+
+    captured = {}
+    df = pd.DataFrame({"row_id": range(4), "output": ["h"] * 4})
+    monkeypatch.setattr(codenames.data, "load_dataset", lambda p: df)
+    monkeypatch.setattr(codenames.data, "sample_turns", lambda d, n, seed: d.head(n))
+    monkeypatch.setattr(cli, "_resolve_loader", lambda name: lambda **kw: (
+        object(), object(), {"prefix": "mistral", "chat_template_strategy": "mistral_inst",
+                             "supports_generation": True, "forward_hidden_states_mode": "causal",
+                             "use_truncation": False, "num_layers": 2, "hidden_dim": 8,
+                             "device": "cpu"}))
+    monkeypatch.setattr(codenames.loop, "run_extraction", lambda **kw: captured.update(kw) or {})
+    args = build_parser().parse_args(["run", "--dataset", "/tmp/d.csv", "--output-dir", str(tmp_path),
+                                      "--model", "mistral", "--sample-size", "2",
+                                      "--conditions", "no_social", "--skip-sanity-checks"])
+    assert cli._cmd_run(args) == 0
+    assert captured["conditions"] == ("no_social",)
+
+
+def test_sanity_checks_tolerate_a_single_condition(capsys):
+    import pandas as pd
+    from codenames import sanity as sc
+    empty = pd.DataFrame()
+    results = {"no_social": {"metrics_df": empty, "general_df": empty, "generation_df": None}}
+    sc.sc2_span_coverage(results)                       # must not KeyError on with_social
+    sc.sc5_layer_margin_curve(results, base_dir="/tmp", prefix="x", num_layers=2,
+                              pooling_methods=("mean",))
+    sc.sc7_shuffle_decomposition(results, base_dir="/tmp", prefix="x", num_layers=2, n_shuffles=2)
+    out = capsys.readouterr().out
+    assert "with_social" not in out.split("SC2")[1].split("SC5")[0]
