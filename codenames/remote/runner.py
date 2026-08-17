@@ -124,6 +124,7 @@ def execute_job(
     store: JobStore,
     now_fn: Callable[[], datetime] = _utc_now,
     repo_sha: Optional[str] = None,
+    started_mono: Optional[float] = None,
 ) -> JobStatus:
     """Run one job to completion and return its terminal status."""
     gpu_name, _free, _total = gpu_info()
@@ -172,6 +173,7 @@ def execute_job(
 
     deadline = time.monotonic() + job.timeout_s
     next_flush = time.monotonic()
+    next_heartbeat = time.monotonic()
     outcome = JobState.SUCCEEDED
     exit_code: Optional[int] = None
     fail_reason: Optional[str] = None
@@ -196,6 +198,15 @@ def execute_job(
                 log_fh.flush()
                 store.put_log(job.job_id, log_path)
                 next_flush = now_mono + cfg.log_flush_interval_s
+            if now_mono >= next_heartbeat:
+                # Keep the heartbeat alive DURING the job: without this a
+                # multi-hour patch run reads as STALE from the client even
+                # while its log is advancing, and the operator's next move
+                # ("re-run the runner cell") would start a second runner on
+                # the same output directory.
+                write_heartbeat(cfg, store, now_fn, current_job=job.job_id,
+                                repo_sha=repo_sha, started_mono=started_mono)
+                next_heartbeat = now_mono + cfg.heartbeat_interval_s
 
             if store.is_cancel_requested(job.job_id):
                 _terminate(proc, cfg.grace_period_s)
@@ -359,7 +370,8 @@ def run_agent_loop(
             started_mono=started_mono,
         )
         print(f"[runner] running {job.job_id}: {' '.join(job.argv)}")
-        status = execute_job(job, cfg, store, now_fn, repo_sha=repo_sha)
+        status = execute_job(job, cfg, store, now_fn, repo_sha=repo_sha,
+                             started_mono=started_mono)
         print(f"[runner] {job.job_id} -> {status.state.value}")
 
         idle_since = time.monotonic()

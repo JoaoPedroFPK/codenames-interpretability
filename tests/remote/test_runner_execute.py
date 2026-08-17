@@ -178,3 +178,22 @@ def test_tail_text_keeps_only_the_last_lines():
 
 def test_tail_text_handles_short_input():
     assert tail_text("a\n", 5) == "a"
+
+
+def test_heartbeat_is_refreshed_while_a_job_runs(store, cfg, tmp_path):
+    """A multi-hour job must not read as STALE: the runner has to publish a
+    heartbeat from inside the wait loop, not only between jobs. (Observed
+    2026-08-16: job-status said 'STALE — 299s' while the grid job was
+    printing progress every minute.)"""
+    from datetime import timedelta
+    from codenames.remote.protocol import parse_iso
+
+    cfg.heartbeat_interval_s = 0.05
+    stub = tmp_path / "stub_cli.py"
+    stub.write_text("import sys, time\nprint('go', flush=True); time.sleep(0.6); sys.exit(0)\n")
+    clock = Clock(step_s=1)
+    execute_job(_job(("doctor",)), cfg, store, clock)
+    hb = store.read_heartbeat()
+    assert hb is not None and hb.current_job == "j1"
+    # several ticks elapsed inside the loop; the last heartbeat is recent
+    assert parse_iso(hb.updated_at) > NOW + timedelta(seconds=2)
