@@ -64,3 +64,34 @@ def test_identity_init_translate_is_identity():
                      b=np.zeros((L, d), dtype=np.float32), history=[])
     H = np.arange(8, dtype=np.float32).reshape(2, 4)
     np.testing.assert_allclose(lens.translate(H, 1), H)
+
+
+def test_per_layer_backward_matches_combined_backward_gradient():
+    """train_tuned_lens backpropagates each layer's KL term separately, so
+    the graph never holds more than one layer's vocab-sized logits at once
+    -- the tensor that OOM'd training Llama's tuned lens (d=4096, L=32,
+    vocab=128256: 32 layers' worth of [B*P, V] activations held simultaneously
+    before one combined backward()). Each term depends only on its own leaf
+    parameters and a DETACHED shared input (the frozen hidden state), so L
+    independent backward() calls must accumulate to exactly the gradient a
+    single combined backward() would give -- this proves the substitution is
+    lossless, not an approximation."""
+    import torch
+
+    torch.manual_seed(0)
+    L, n, d = 3, 5, 4
+    x = torch.randn(n, d)  # shared, DETACHED input (plays the role of `h`)
+    combined = [torch.randn(d, d, requires_grad=True) for _ in range(L)]
+    layered = [w.detach().clone().requires_grad_(True) for w in combined]
+
+    def term(w):
+        return (x @ w).pow(2).sum()
+
+    loss = sum(term(w) for w in combined) / L
+    loss.backward()
+
+    for w in layered:
+        (term(w) / L).backward()
+
+    for a, b in zip(combined, layered):
+        torch.testing.assert_close(a.grad, b.grad, atol=1e-5, rtol=1e-5)

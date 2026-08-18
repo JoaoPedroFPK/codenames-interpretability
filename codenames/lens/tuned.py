@@ -101,7 +101,12 @@ def train_tuned_lens(model, tokenizer, texts, config: TunedLensConfig,
     val_history: List[float] = []
 
     def _mean_kl(input_ids, pos):
-        """Mean per-position KL(final ‖ lens), averaged over layers."""
+        """Mean per-position KL(final ‖ lens), averaged over layers.
+
+        Validation only: called under the caller's ``torch.no_grad()``, so no
+        graph is retained regardless of the accumulate-then-return shape.
+        Training uses ``_backward_and_total`` instead (see its docstring).
+        """
         with torch.no_grad():
             out = model(input_ids=input_ids, output_hidden_states=True,
                         return_dict=True)
@@ -119,17 +124,51 @@ def train_tuned_lens(model, tokenizer, texts, config: TunedLensConfig,
                                    reduction="batchmean")
         return loss / L
 
+    def _backward_and_total(input_ids, pos) -> float:
+        """One optimiser step's backward, one layer's graph at a time.
+
+        Summing all L layers' KL terms into one graph before a single
+        ``backward()`` (the original design) holds L simultaneous copies of
+        the vocab-sized logits (``[B*P, V]``) until that one call returns --
+        for a large vocabulary and many layers (Llama: d=4096, L=32,
+        V=128256) that exceeded 39 GB on an A100 mid-training. Each term
+        depends only on its OWN leaf parameters (``D[layer]``, ``b[layer]``)
+        and a hidden state already detached from the frozen forward pass, so
+        the terms share no graph nodes; calling ``backward()`` once per layer
+        accumulates into ``D.grad``/``b.grad`` exactly what one combined
+        backward would (proved in ``test_per_layer_backward_matches_combined
+        _backward_gradient``), while never holding more than one layer's
+        logits in memory.
+        """
+        with torch.no_grad():
+            out = model(input_ids=input_ids, output_hidden_states=True,
+                        return_dict=True)
+        teacher = F.log_softmax(
+            out.logits[:, pos, :].float(), dim=-1).detach()
+        teacher = teacher.reshape(-1, teacher.shape[-1])
+        total = 0.0
+        for layer in range(L):
+            h = out.hidden_states[layer][:, pos, :].float().detach()
+            translated = h + h @ D[layer].T + b[layer]
+            student = F.log_softmax(
+                lm_head(norm(translated.to(norm.weight.dtype))).float(),
+                dim=-1).reshape(-1, teacher.shape[-1])
+            layer_loss = F.kl_div(student, teacher, log_target=True,
+                                  reduction="batchmean") / L
+            layer_loss.backward()
+            total += float(layer_loss.detach())
+        return total
+
     for step in range(config.n_steps):
         batch = chunks[rng.integers(0, len(chunks),
                                     size=config.seqs_per_step)]
         input_ids = torch.tensor(batch, dtype=torch.long, device=device)
         pos = rng.integers(1, config.seq_len,
                            size=min(config.positions_per_seq, config.seq_len - 1))
-        loss = _mean_kl(input_ids, pos)
         opt.zero_grad()
-        loss.backward()
+        loss_value = _backward_and_total(input_ids, pos)
         opt.step()
-        history.append(float(loss.detach().cpu()))
+        history.append(loss_value)
 
         last = step + 1 == config.n_steps
         if n_val and (last or (step + 1) % config.val_every == 0):
