@@ -197,3 +197,31 @@ def test_redundant_roles_for_word_first_models():
     assert redundant_roles(cur) == {"final", "generation"}
     cur.loc[cur.role == "final", "e"] += 0.1
     assert redundant_roles(cur) == set()
+
+
+def test_cli_triangulation_forwards_models(tmp_path, monkeypatch):
+    """``--models`` selects which decoders get a panel, not only which effects
+    files are read: a decoder run through geometry and lens but not patching
+    (Llama) has to be renderable on its own.
+    """
+    from pathlib import Path
+    from codenames.analysis import paper_figures as pf
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "lens").mkdir()
+    _conc(models=("mistral", "qwen", "llama", "random_qwen")).to_csv(
+        tmp_path / "analysis" / "analysis_concordance_by_layer.csv", index=False)
+    _lens_curves(models=("mistral", "qwen", "llama", "random_qwen")).to_csv(
+        tmp_path / "lens" / "lens_curves_answer_no_social.csv", index=False)
+    seen = {}
+
+    def fake(conc, lens, effects, *, out_path, models=("mistral", "qwen"), **kw):
+        seen["models"] = tuple(models)
+        Path(out_path).write_text("x")
+        return Path(out_path)
+
+    monkeypatch.setattr(pf, "fig_triangulation", fake)
+    pf.main(["--fig", "triangulation", "--models", "llama",
+             "--analysis-dir", str(tmp_path / "analysis"),
+             "--lens-dir", str(tmp_path / "lens"),
+             "--out", str(tmp_path / "A_llama.pdf")])
+    assert seen["models"] == ("llama",)

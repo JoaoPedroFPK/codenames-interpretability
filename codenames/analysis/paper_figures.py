@@ -191,7 +191,8 @@ def fig_geometry(conc_by_layer: pd.DataFrame, margins: pd.DataFrame,
     for ax, letter in zip(live, "abcd"):
         ax.set_xlabel(DEPTH_LABEL)
         ax.set_xlim(0, 1)
-        _letter(ax, letter)
+        if len(live) > 1:        # a lone panel needs no letter
+            _letter(ax, letter)
     if single:
         legend_models = [m for m in (*a_models, DECODER_NULL)
                          if not conc[conc["model"] == m].empty]
@@ -604,13 +605,14 @@ def fig_triangulation(conc_by_layer: pd.DataFrame, lens_curves: pd.DataFrame,
                             fmt=st["marker"], color=st["color"], markersize=2.4, lw=0.7,
                             capsize=1.0, label=f"patch $e$: {st['label']}", zorder=3)
         else:
-            ax.text(0.5, 0.92, "patching: pending", transform=ax.transAxes, ha="center",
+            ax.text(0.5, 0.92, "no patching run", transform=ax.transAxes, ha="center",
                     fontsize=6, color="#888888")
         ax.set_title(s["label"], fontsize=7, pad=2)
         ax.set_xlabel("Layer")
         ax.set_ylim(0, 1.05)
         ax.set_xlim(-0.5, (int(g["layer"].max()) if not g.empty else 32) + 0.5)
-        _letter(ax, letter)
+        if len(models) > 1:          # a lone panel needs no letter
+            _letter(ax, letter)
     axes[0].set_ylabel("top-1 fraction / patch effect $e$")
     # Legend over ALL panels: a role tested in one decoder only (Qwen's
     # generating position) must still be named.
@@ -642,7 +644,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--analysis-dir", default="output/analysis")
     ap.add_argument("--lens-dir", default="output/lens_analysis")
-    ap.add_argument("--models", default="mistral", help="comma-separated, for --fig causal")
+    ap.add_argument("--models", default="mistral",
+                    help="comma-separated; --fig causal: which models to load and draw; --fig triangulation: which decoders get a panel")
     ap.add_argument("--panels", default="abcd", help="geometry panels: abcd, ab or a")
     ap.add_argument("--layout", default="both", choices=("both", "curves", "scan"),
                     help="causal figure layout: both (scan+curve per model), curves only, or scan only")
@@ -709,7 +712,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out = fig_triangulation(
             _read(os.path.join(a.analysis_dir, "analysis_concordance_by_layer.csv")),
             _read(os.path.join(a.lens_dir, f"lens_curves_answer_{a.condition}.csv")),
-            effects, out_path=a.out, pooling=a.pooling, condition=a.condition,
+            effects, out_path=a.out, models=tuple(a.models.split(",")),
+            pooling=a.pooling, condition=a.condition,
             shuffle=_read(os.path.join(a.lens_dir, f"lens_shuffle_control_answer_{a.condition}.csv")))
         print(f"wrote {out}")
     return 0
