@@ -1836,8 +1836,30 @@ def _make_causal_steer_parser(sp) -> argparse.ArgumentParser:
     p.add_argument("--condition", default="no_social",
                    choices=["no_social", "with_social"])
     p.add_argument("--dataset", required=True, help="Path to clue_generation.csv.")
-    p.add_argument("--layer", type=int, required=True,
-                   help="Injection layer; sweep by submitting one job per layer.")
+    p.add_argument("--intervention", default="additive",
+                   choices=["additive", "equalise"],
+                   help="additive = add a direction to the residual (spec §5B); "
+                        "equalise = rotate the candidate states until the hint "
+                        "points at none of them (§5C, the title-level test). "
+                        "The geometric mode is a mode of this command rather "
+                        "than a new subcommand so the runner whitelist, and "
+                        "therefore the execution surface of the Drive folder, "
+                        "does not widen.")
+    p.add_argument("--layer", type=int, default=None,
+                   help="Injection layer for --intervention additive; sweep by "
+                        "submitting one job per layer.")
+    p.add_argument("--layers", default="all",
+                   help="--intervention equalise: comma-separated layers or "
+                        "'all' for the full sweep in one job. The spec replaced "
+                        "a geometry-chosen null layer with the whole sweep, so "
+                        "the sweep is the default.")
+    p.add_argument("--generation-csv", default=None,
+                   help="Recorded generations that fix the answer position p* "
+                        "(spec 4.1); the readout sits at p_read = p*-1. "
+                        "Defaults to the conventional per-model path.")
+    p.add_argument("--no-generations", action="store_true",
+                   help="This model has no recorded generations (the "
+                        "random-init null); measure at the generating position.")
     p.add_argument("--direction", default="lens", choices=["lens", "dom"],
                    help="lens = label-free (primary); dom = label-fitted (robustness).")
     p.add_argument("--sites", default="from_hint",

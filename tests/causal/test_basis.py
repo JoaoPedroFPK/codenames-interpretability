@@ -218,3 +218,34 @@ def test_roles_are_a_fixed_vocabulary():
     assert ROLES[0] == "prefix"
     assert {"hint", "cand_target", "cand_donor", "final", "generation"} <= set(ROLES)
     assert len(set(ROLES)) == len(ROLES)
+
+
+# --- per-candidate token spans (T3d: the equalisation intervention) ---------
+
+def test_span_positions_gives_one_token_range_per_candidate_and_the_hint(tok):
+    """The equalisation intervention rotates each candidate span separately, so
+    it needs per-candidate ranges, not the collapsed cand_other role."""
+    from codenames.causal.basis import span_positions
+
+    candidates = ["moon", "sea", "ship"]
+    prompt = _prompt(tok, "water", candidates)
+    spans = span_positions(tok, prompt, hint="water", candidates=candidates)
+
+    assert set(spans) == {"hint", "moon", "sea", "ship"}
+    for name, (lo, hi) in spans.items():
+        assert 0 <= lo < hi, name
+    ids = tok(prompt)["input_ids"]
+    for word in candidates:
+        lo, hi = spans[word]
+        assert word in tok.decode(ids[lo:hi]).lower()
+
+
+def test_span_positions_does_not_match_inside_a_longer_candidate(tok):
+    """ICE must not land on the first three characters of ICE CREAM."""
+    from codenames.causal.basis import span_positions
+
+    candidates = ["ice cream", "ice", "sea"]
+    prompt = _prompt(tok, "cold", candidates)
+    spans = span_positions(tok, prompt, hint="cold", candidates=candidates)
+    assert spans["ice"] != spans["ice cream"]
+    assert spans["ice"][0] >= spans["ice cream"][1]

@@ -20,7 +20,13 @@ from ..data import GIVER_COLS, extract_giver_features
 from ..lens.readout import build_token_table
 from ..prompts import build_prompt
 from .attribution import attribution_scan, top_sites
-from .basis import ROLES, collapse_grid, role_of_each_token, role_positions
+from .basis import ROLES, collapse_grid, role_of_each_token, role_positions, span_positions
+from .geometry import (
+    cosine_to,
+    displacement_matched_rotation,
+    equalise_cosines,
+    swap_cosines,
+)
 from .metrics import logit_difference
 from .pairs import build_pair_table, substitute_hint
 from .patch import all_sites, layer_window, run_patch
@@ -34,6 +40,11 @@ from .steer import (
 )
 
 STEER_ARMS = ("primary", "random_direction", "shuffled_label", "counterfactual_target")
+
+# T3d (causal_spec.md §5C). `equalise` is primary; the other three are the
+# controls without which "removing the proximity changed the answer" cannot be
+# told apart from "perturbing the states changed the answer".
+EQUALISE_ARMS = ("equalise", "hold_target", "swap", "displacement")
 
 
 class _Context:
@@ -451,4 +462,154 @@ def run_steer_stage(
                     "hit_donor_target": pair.donor_target.lower() in lowered,
                     "parsed": bool(text.strip()),
                 })
+    return pd.DataFrame(rows)
+
+
+def _pooled_spans(hidden, spans: Dict[str, Tuple[int, int]]):
+    """Mean-pooled state per named span, matching what g(l) measures."""
+    return {name: hidden[lo:hi].mean(0).double().cpu().numpy()
+            for name, (lo, hi) in spans.items() if hi > lo}
+
+
+def _rotated_sites(hidden, spans, new_vectors):
+    """``(positions, values)`` writing each span's rotation back token by token.
+
+    The transform is defined on the span's mean-pooled vector, because that is
+    the vector the geometric readout ranks. Applying the same displacement to
+    every token of the span moves the mean by exactly that displacement and
+    leaves the within-span structure alone, which is the minimal edit with the
+    intended effect on g(l).
+    """
+    import torch
+
+    positions, values = [], []
+    for name, (lo, hi) in spans.items():
+        if name not in new_vectors or hi <= lo:
+            continue
+        before = hidden[lo:hi].mean(0).double()
+        delta = torch.as_tensor(new_vectors[name], dtype=torch.float64,
+                                device=hidden.device) - before
+        for position in range(lo, hi):
+            positions.append(position)
+            values.append(hidden[position].double() + delta)
+    return positions, values
+
+
+def run_equalise_stage(
+    *, model, tokenizer, df_sample, chat_template_strategy, mode, seed,
+    layers: Sequence[int], alphas: Sequence[float] = (1.0,),
+    device: Optional[str] = None, generation_csv: Optional[str] = None,
+) -> pd.DataFrame:
+    """Rotate the candidate states until the hint points at none of them (§5C).
+
+    The paper's causal tier patches states; this stage intervenes on the
+    *geometry* the paper is about. At each requested layer every candidate span
+    is rotated so that all hint-to-candidate cosines are equal, the hint itself
+    is left alone, and the answer is read at ``p_read`` exactly as in the
+    patching grid, so the two live on the same axis.
+
+    Four arms per (layer, alpha), in the order that makes the result readable:
+
+    ``equalise``      the primary intervention, the target's advantage removed;
+    ``hold_target``   everything *except* the target flattened, so the target
+                      keeps its advantage — a specificity control that should
+                      behave like the clean run;
+    ``swap``          the target's and the donor's angles exchanged, which
+                      predicts *which* word the answer should move to;
+    ``displacement``  every candidate moved exactly as far as the primary arm
+                      moved it, in a direction that leaves every hint-relative
+                      cosine unchanged — the control that separates the
+                      geometry from the size of the perturbation.
+
+    Per-turn ``ld_clean``, ``ld_corrupt`` and ``ld_intervened`` are all stored,
+    so the effect can be estimated as a ratio of sums rather than only as a mean
+    of per-turn ratios.
+    """
+    import torch
+
+    from .patch import _decoder_layers, module_for_layer, patch_hook
+
+    ctx = _Context(model=model, tokenizer=tokenizer, df_sample=df_sample,
+                   chat_template_strategy=chat_template_strategy, mode=mode,
+                   seed=seed, device=device, generation_csv=generation_csv)
+    decoder_layers = _decoder_layers(model)
+
+    rows: List[Dict[str, object]] = []
+    for pair in ctx.pairs.itertuples():
+        clean_prompt = ctx.prompt(pair.row_id, pair.hint)
+        corrupt_prompt = ctx.prompt(pair.row_id, pair.donor_hint)
+        suffix, p_star = ctx.measurement(pair.row_id, clean_prompt)
+        p_read = readout_index(p_star)
+        clean_text = clean_prompt + suffix
+        corrupt_text = corrupt_prompt + suffix
+
+        table = ctx.table(pair.row_id)
+        cache, clean_logits, n_positions = ctx.clean_cache(clean_text, p_read)
+        ld_clean = logit_difference(clean_logits, table, str(pair.clean_target),
+                                    str(pair.donor_target))
+        ld_corrupt = logit_difference(
+            ctx.corrupt_logits(corrupt_text, p_read), table,
+            str(pair.clean_target), str(pair.donor_target))
+
+        spans = span_positions(tokenizer, clean_prompt, hint=str(pair.hint),
+                               candidates=list(ctx.by_id.loc[pair.row_id, "candidates"]))
+        hint_span = spans.pop("hint", None)
+        spans = {w: (lo, hi) for w, (lo, hi) in spans.items() if hi <= n_positions}
+        if hint_span is None or len(spans) < 2:
+            continue
+
+        inputs = tokenizer(clean_text, return_tensors="pt").to(ctx.device)
+        for layer in layers:
+            if layer >= len(cache):
+                continue
+            hidden = cache[layer][0]
+            hint_vec = hidden[hint_span[0]:hint_span[1]].mean(0).double().cpu().numpy()
+            candidates = _pooled_spans(hidden, spans)
+            before = cosine_to(candidates, hint_vec)
+            pool_mean = float(np.mean(list(before.values())))
+            target, donor = str(pair.clean_target), str(pair.donor_target)
+            if target not in candidates or donor not in candidates:
+                continue
+
+            for alpha in alphas:
+                primary = equalise_cosines(candidates, hint_vec, alpha=float(alpha))
+                arms = {
+                    "equalise": primary,
+                    "hold_target": equalise_cosines(candidates, hint_vec,
+                                                    alpha=float(alpha), hold=(target,)),
+                    "swap": swap_cosines(candidates, hint_vec, target, donor,
+                                         alpha=float(alpha)),
+                    "displacement": displacement_matched_rotation(
+                        candidates, hint_vec, reference=primary, seed=seed,
+                        order=sorted(candidates)),
+                }
+                for arm in EQUALISE_ARMS:
+                    positions, values = _rotated_sites(hidden, spans, arms[arm])
+                    if not positions:
+                        continue
+                    module = module_for_layer(model, decoder_layers, layer,
+                                              len(cache) - 1)
+                    handle = module.register_forward_hook(
+                        patch_hook(positions, torch.stack(values).to(hidden.dtype)))
+                    try:
+                        with torch.no_grad():
+                            out = model(**inputs)
+                        logits = out.logits[0, p_read].detach().float().cpu().numpy()
+                    finally:
+                        handle.remove()
+                    new_vectors = arms[arm]
+                    after = cosine_to(new_vectors, hint_vec)
+                    rows.append({
+                        "row_id": int(pair.row_id), "layer": int(layer),
+                        "arm": arm, "alpha": float(alpha),
+                        "n_candidates": len(candidates),
+                        "ld_clean": ld_clean, "ld_corrupt": ld_corrupt,
+                        "ld_intervened": logit_difference(
+                            logits, table, target, donor),
+                        "cos_target_before": before[target],
+                        "cos_target_after": after[target],
+                        "cos_donor_before": before[donor],
+                        "cos_donor_after": after[donor],
+                        "cos_pool_mean_before": pool_mean,
+                    })
     return pd.DataFrame(rows)

@@ -53,6 +53,8 @@ def _paths(args) -> Dict[str, str]:
         "grid_claims": os.path.join(
             base, f"{prefix}_causal_grid_claims_{scheme}_{condition}{dsuf}.csv"),
         "steer": os.path.join(base, f"{prefix}_causal_steer_{condition}.csv"),
+        "equalise": os.path.join(
+            base, f"{prefix}_causal_equalise_{condition}.parquet"),
         "pilot": os.path.join(base, f"{prefix}_causal_pilot_{condition}.csv"),
         "claims": os.path.join(base, f"{prefix}_causal_claims_{condition}.csv"),
         "figures": os.path.join(base, "figures"),
@@ -258,9 +260,23 @@ def _cmd_patch_grid(args) -> int:
     return 0
 
 
+def _requested_layers(spec: str, n_states: int) -> List[int]:
+    """``"all"`` or a comma-separated list, bounded by the model's depth."""
+    if str(spec).strip().lower() == "all":
+        return list(range(n_states))
+    wanted = [int(x) for x in str(spec).split(",") if x.strip()]
+    return [layer for layer in wanted if 0 <= layer < n_states]
+
+
 def cmd_steer(args) -> int:
-    """Stage 3: dose-response with the four pre-registered control arms."""
-    from .stages import run_steer_stage
+    """Stage 3: dose-response with the four pre-registered control arms.
+
+    ``--intervention equalise`` runs the geometric intervention of §5C instead:
+    the candidate states are rotated until the hint is equidistant from all of
+    them, which tests the paper's title question directly rather than through
+    co-occurrence.
+    """
+    from .stages import run_equalise_stage, run_steer_stage
 
     paths = _paths(args)
     os.makedirs(paths["base"], exist_ok=True)
@@ -268,6 +284,26 @@ def cmd_steer(args) -> int:
     df = _sample(args.dataset, args.sample_size, args.seed,
                  exclude_pilot_n=getattr(args, "pilot_n", 0))
     alphas = tuple(float(a) for a in str(args.alphas).split(",") if a.strip())
+
+    if getattr(args, "intervention", "additive") == "equalise":
+        n_states = int(getattr(model.config, "num_hidden_layers", 0)) + 1
+        layers = _requested_layers(getattr(args, "layers", "all"), n_states)
+        out = run_equalise_stage(
+            model=model, tokenizer=tokenizer, df_sample=df,
+            chat_template_strategy=meta["chat_template_strategy"],
+            mode=args.condition, seed=args.seed, layers=layers,
+            alphas=alphas or (1.0,),
+            generation_csv=_generation_csv(args, paths),
+        )
+        out.to_parquet(paths["equalise"], index=False)
+        summary = (out[out["arm"] == "equalise"]
+                   .groupby("layer")["ld_intervened"].mean().round(3))
+        print(f"  {len(out)} rows over {len(layers)} layers -> {paths['equalise']}")
+        print(f"  mean LD after the primary arm, by layer:\n{summary.to_string()}")
+        return 0
+
+    if args.layer is None:
+        raise SystemExit("--layer is required for --intervention additive")
 
     out = run_steer_stage(
         model=model, tokenizer=tokenizer, df_sample=df,

@@ -141,6 +141,36 @@ def _tokens_for(mapping: Sequence, char_span: Tuple[int, int]) -> Tuple[int, int
     return (start, end) if start is not None else (0, 0)
 
 
+def span_positions(
+    tokenizer, prompt: str, *, hint: str, candidates: Sequence[str],
+) -> Dict[str, Tuple[int, int]]:
+    """Half-open token ranges for the hint and for **each candidate separately**.
+
+    ``role_of_each_token`` collapses every non-target, non-donor candidate into
+    one ``cand_other`` role, which is the right axis for the patching grid and
+    the wrong one for the equalisation intervention (causal_spec.md §5C): that
+    intervention rotates every candidate span by its own angle, so it needs the
+    spans one at a time. Candidate location reuses ``_char_spans``, so the
+    numbered-list anchoring that keeps ICE off ICE CREAM applies here too.
+
+    Keys are ``"hint"`` and the candidate words as given. Candidates the
+    tokenizer cannot resolve are omitted rather than guessed at.
+    """
+    mapping = _offsets(tokenizer, prompt)
+    if mapping is None:
+        return {}
+    chars = _char_spans(prompt, hint, candidates)
+    out: Dict[str, Tuple[int, int]] = {}
+    for key, char_span in chars.items():
+        if key == "question":
+            continue
+        name = key[len("cand:"):] if key.startswith("cand:") else key
+        lo, hi = _tokens_for(mapping, char_span)
+        if hi > lo:
+            out[name] = (lo, hi)
+    return out
+
+
 def role_of_each_token(
     tokenizer,
     prompt: str,

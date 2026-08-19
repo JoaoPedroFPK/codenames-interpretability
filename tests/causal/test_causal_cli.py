@@ -142,3 +142,70 @@ def test_no_generations_defaults_false_so_a_missing_file_still_errors():
                                       "--output-dir", "/tmp/x",
                                       "--dataset", "/tmp/d.csv"])
     assert args.no_generations is False
+
+
+# --- T3d: the geometric intervention rides on causal-steer ------------------
+
+def test_steer_exposes_the_equalise_intervention():
+    """A new subcommand would have to be added to the runner whitelist, which
+    widens what a file dropped in a Drive folder can execute. The geometric
+    intervention is a mode of the already-whitelisted causal-steer instead."""
+    args = build_parser().parse_args(
+        ["causal-steer", "--model", "mistral", "--output-dir", "/tmp/x",
+         "--dataset", "/tmp/d.csv", "--intervention", "equalise",
+         "--layers", "0,5,23"])
+    assert args.intervention == "equalise"
+    assert args.layers == "0,5,23"
+
+
+def test_steer_still_defaults_to_the_additive_intervention():
+    args = build_parser().parse_args(
+        ["causal-steer", "--model", "mistral", "--output-dir", "/tmp/x",
+         "--dataset", "/tmp/d.csv", "--layer", "5"])
+    assert args.intervention == "additive"
+
+
+def test_equalise_accepts_a_full_layer_sweep_in_one_job():
+    """The spec replaced a chosen null layer with the whole sweep, so the sweep
+    has to be one job rather than 33."""
+    args = build_parser().parse_args(
+        ["causal-steer", "--model", "mistral", "--output-dir", "/tmp/x",
+         "--dataset", "/tmp/d.csv", "--intervention", "equalise",
+         "--layers", "all"])
+    assert args.layers == "all"
+
+
+def test_steer_routes_the_equalise_mode_to_its_own_stage():
+    import inspect
+    from codenames.causal import runner
+    src = inspect.getsource(runner.cmd_steer)
+    assert "run_equalise_stage" in src and "equalise" in src
+
+
+def test_equalise_resolves_the_answer_position_like_every_other_stage():
+    """The readout must sit at p_read. Passing no generation CSV silently
+    downgrades it to the generating position, which on Mistral is the wrong
+    token on 87% of turns — the defect spec amendment (k) exists to prevent."""
+    import inspect
+    from codenames.causal import runner
+    src = inspect.getsource(runner.cmd_steer)
+    assert "_generation_csv(args, paths)" in src
+    assert 'paths.get("generation")' not in src
+
+
+def test_steer_exposes_the_generation_flags_the_readout_needs():
+    args = build_parser().parse_args(
+        ["causal-steer", "--model", "mistral", "--output-dir", "/tmp/x",
+         "--dataset", "/tmp/d.csv", "--intervention", "equalise",
+         "--generation-csv", "/tmp/g.csv"])
+    assert args.generation_csv == "/tmp/g.csv"
+    assert args.no_generations is False
+
+
+def test_layer_sweep_spec_is_bounded_by_the_models_depth():
+    from codenames.causal.runner import _requested_layers
+    assert _requested_layers("all", 33) == list(range(33))
+    assert _requested_layers("0,5,23", 33) == [0, 5, 23]
+    # a layer the model does not have is dropped, not silently clamped onto
+    # another layer, which would mislabel the depth axis
+    assert _requested_layers("5,99,-1", 33) == [5]

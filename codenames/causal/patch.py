@@ -87,6 +87,22 @@ def patch_hook(positions: Sequence[int], values: torch.Tensor) -> Callable:
     return hook
 
 
+def module_for_layer(model, layers, layer: int, top: int):
+    """The module whose output *is* cached hidden-state index ``layer``.
+
+    Index 0 is the embedding output and index ``top`` is the state after the
+    final norm; everything between is the output of decoder block ``layer - 1``.
+    Any stage that writes into the residual stream has to agree with this map or
+    its layer axis silently means something different from the patching grid's.
+    """
+    final_norm = _final_norm(model)
+    if layer == 0:
+        return model.get_input_embeddings()
+    if layer == top and final_norm is not None:
+        return final_norm
+    return layers[layer - 1]
+
+
 def _register(model, layers, sites: Sequence[Site], clean_cache) -> List:
     """Hook the module that produces each cached index."""
     by_layer: Dict[int, List[int]] = {}
@@ -95,15 +111,9 @@ def _register(model, layers, sites: Sequence[Site], clean_cache) -> List:
 
     handles = []
     top = len(clean_cache) - 1          # index of the post-final-norm state
-    final_norm = _final_norm(model)
     for layer, positions in by_layer.items():
         values = torch.stack([clean_cache[layer][0, p] for p in positions])
-        if layer == 0:
-            module = model.get_input_embeddings()
-        elif layer == top and final_norm is not None:
-            module = final_norm
-        else:
-            module = layers[layer - 1]
+        module = module_for_layer(model, layers, layer, top)
         handles.append(module.register_forward_hook(patch_hook(positions, values)))
     return handles
 

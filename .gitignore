@@ -55,3 +55,5 @@ client_secret_*.json
 token.json
 
 *.md
+
+.env

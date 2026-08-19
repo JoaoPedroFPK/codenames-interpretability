@@ -363,3 +363,57 @@ def test_scan_corrupted_run_gets_the_counterfactual_scaffold(
     assert row1, "row 1 never reached the scan"
     assert "water" not in row1[0].lower()
     assert "rocket" in row1[0].lower()
+
+
+# --- T3d: the geometric intervention (causal_spec.md §5C) -------------------
+
+def _equalise(tiny, **kw):
+    from codenames.causal.stages import run_equalise_stage
+    return run_equalise_stage(**{**_common(tiny), **kw})
+
+
+def test_equalise_stage_covers_every_arm_and_layer(tiny):
+    out = _equalise(tiny, layers=[0, 1], alphas=[1.0])
+    from codenames.causal.stages import EQUALISE_ARMS
+    assert set(out["arm"]) == set(EQUALISE_ARMS)
+    assert set(out["layer"]) == {0, 1}
+    for arm in EQUALISE_ARMS:
+        assert not out[out["arm"] == arm].empty
+
+
+def test_equalise_stage_records_the_ld_components(tiny):
+    """T1 stored only the ratio, so e could not be re-estimated as a ratio of
+    sums. This stage stores the three logit differences per turn."""
+    out = _equalise(tiny, layers=[1], alphas=[1.0])
+    for column in ("ld_clean", "ld_corrupt", "ld_intervened"):
+        assert column in out.columns
+    assert np.isfinite(out["ld_clean"]).any()
+
+
+def test_equalise_stage_reports_the_cosine_it_actually_imposed(tiny):
+    """The intervention is only interpretable if the geometry it produced is
+    recorded, not assumed: the target's cosine after the primary arm must equal
+    the pool mean it was rotated to."""
+    out = _equalise(tiny, layers=[1], alphas=[1.0])
+    primary = out[(out["arm"] == "equalise") & (out["alpha"] == 1.0)]
+    assert not primary.empty
+    np.testing.assert_allclose(
+        primary["cos_target_after"].to_numpy(),
+        primary["cos_pool_mean_before"].to_numpy(), atol=1e-6)
+
+
+def test_equalise_at_alpha_zero_leaves_the_answer_untouched(tiny):
+    """alpha = 0 is the identity transform, so the intervened logit difference
+    must equal the clean one. This is the stage's own null identity."""
+    out = _equalise(tiny, layers=[1], alphas=[0.0])
+    rows = out[out["arm"] == "equalise"]
+    finite = rows[np.isfinite(rows["ld_clean"]) & np.isfinite(rows["ld_intervened"])]
+    assert not finite.empty
+    np.testing.assert_allclose(
+        finite["ld_intervened"].to_numpy(), finite["ld_clean"].to_numpy(), atol=1e-3)
+
+
+def test_equalise_stage_is_deterministic(tiny):
+    a = _equalise(tiny, layers=[1], alphas=[1.0])
+    b = _equalise(tiny, layers=[1], alphas=[1.0])
+    pd.testing.assert_frame_equal(a, b)
