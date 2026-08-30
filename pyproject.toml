@@ -13,21 +13,29 @@ authors = [{ name = "João Pedro Ferreira Pereira Königs" }]
 keywords = ["interpretability", "transformers", "geometric-analysis", "codenames"]
 
 dependencies = [
-    # Pin the full torch stack together: transformers transitively imports
-    # torchvision on every model load, so a torchvision built against a
+    # The torch stack must stay mutually consistent: transformers transitively
+    # imports torchvision on every model load, so a torchvision built against a
     # different torch crashes with "operator torchvision::nms does not exist".
-    "torch==2.5.1",
-    "torchvision==0.20.1",
-    "torchaudio==2.5.1",
+    # These are FLOORS, not exact pins (2026-08-30): exact pins tracked one
+    # Colab image and broke when the image moved past the pinned wheels
+    # (torchvision==0.20.1 uninstallable on the current runtime). A floor lets
+    # pip keep Colab's own preinstalled, matched stack, and keeps the local env
+    # (torch 2.5.1 / torchvision 0.20.1 / torchaudio 2.5.1) untouched. The
+    # versions a run actually used are recorded by the runner logs; the paper's
+    # reproducibility card states the versions of the runs it reports.
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+    "torchaudio>=2.5.1",
     "transformers==4.48.0",
-    # numpy/pandas held to what Colab's own stack requires, so `pip install -e .`
-    # doesn't fight google-colab (pins pandas==2.2.2) or numba (needs numpy<2.1).
-    "numpy==2.0.2",
-    "pandas==2.2.2",
-    "tqdm==4.67.1",
-    "scipy==1.14.1",
-    "pyarrow==18.1.0",
-    "accelerate==1.2.1",
+    # numpy/pandas as floors for the same reason: the old exact pins matched an
+    # earlier Colab image (and numpy 2.0.2 / pandas 2.2.2 have no wheels for
+    # newer Pythons); the local env satisfies the floors as installed.
+    "numpy>=2.0.2,<3",
+    "pandas>=2.2.2,<3",
+    "tqdm>=4.67.1",
+    "scipy>=1.14.1,<2",
+    "pyarrow>=18.1.0",
+    "accelerate>=1.2.1,<2",
 ]
 
 [project.optional-dependencies]
